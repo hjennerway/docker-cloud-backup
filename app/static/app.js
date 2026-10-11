@@ -10,9 +10,11 @@ const esc = (value) =>
   );
 let state = null,
   page = "stacks",
-  refreshBusy = false,
+  refreshPromise = null,
+  manualBackupBusy = false,
   toastTimer,
   folderTrail = [];
+const manualSelectionsSaving = new Map();
 const pages = {
   stacks: "Stacks",
   destinations: "Destinations",
@@ -115,15 +117,16 @@ function route() {
 function getStack(name) {
   return state.stacks.find((s) => s.name === name);
 }
-async function refresh() {
-  if (refreshBusy) return;
-  refreshBusy = true;
-  try {
-    state = await api("/dashboard");
-    render();
-  } finally {
-    refreshBusy = false;
-  }
+async function refresh(fresh = false) {
+  if (fresh && refreshPromise) await refreshPromise;
+  if (refreshPromise) return refreshPromise;
+  refreshPromise = api("/dashboard")
+    .then((dashboard) => {
+      state = dashboard;
+      render();
+    })
+    .finally(() => { refreshPromise = null; });
+  return refreshPromise;
 }
 function render() {
   if (!state) return;
@@ -148,6 +151,16 @@ function render() {
   renderRules();
 }
 function renderStacks() {
+  const included = (stack) => !stack.excluded &&
+    (manualSelectionsSaving.get(stack.name) ?? stack.include_in_manual_backup);
+  const selected = state.stacks.filter(included);
+  const needsReview = selected.some((stack) => stack.issues.length);
+  $("backup-selected").textContent = `Backup ${selected.length} selected`;
+  $("backup-selected").disabled = !selected.length || needsReview || state.busy ||
+    !!state.docker_error || !!state.recovery.length || manualBackupBusy || !!manualSelectionsSaving.size;
+  $("manual-backup-hint").textContent = needsReview
+    ? "Review the selected stacks before backing up. You can also turn off their manual backup toggles."
+    : "Include stacks in manual backup below. All selected stacks, including search results hidden from view, run one at a time, stopping and restarting their running containers.";
   const scheduled = state.stacks.filter((s) => s.schedule.enabled).length,
     latest = state.jobs[0],
     destinations =
@@ -195,7 +208,7 @@ function renderStacks() {
     return;
   }
   $("stacks-list").innerHTML =
-    `<div class="table-head"><span>STACK</span><span>BACKUP CONTENTS</span><span>VOLUMES</span><span>BACKUP SCHEDULE</span><span></span></div>` +
+    `<div class="table-head"><span>STACK</span><span>BACKUP CONTENTS</span><span>VOLUMES</span><span>BACKUP SCHEDULE</span><span>MANUAL BACKUP</span><span></span></div>` +
     stacks
       .map((s) => {
         const ready = !s.issues.length;
@@ -209,7 +222,8 @@ function renderStacks() {
             : '<span class="badge warn">Needs review</span>';
         const mode = selectionSummary(s);
         const volumes = s.volumes.map((v) => `<li><strong>${esc(v.name)}</strong><small>${v.type === "bind" ? "Bind mount" : "Named volume"} · ${size(v.size_bytes)}${s.backup_selection.mode === "volumes" && s.backup_selection.volumes.includes(v.id) ? " · Included" : ""}</small></li>`).join("");
-        return `<article class="stack-row"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div><div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
+        const manualToggle = `<div class="manual-backup-cell"><label class="manual-backup-toggle"><input type="checkbox" role="switch" data-manual-backup data-name="${esc(s.name)}" ${included(s) ? "checked" : ""} ${s.excluded || manualSelectionsSaving.has(s.name) || manualBackupBusy ? "disabled" : ""}><span>Include in manual backup<span class="sr-only"> for ${esc(s.name)}</span></span></label></div>`;
+        return `<article class="stack-row"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div>${manualToggle}<div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
       })
       .join("");
 }
@@ -462,6 +476,26 @@ async function browseFolders(id = "root", name = "My Drive", up = false) {
       `<h2>Could not load folders</h2><p class="error">${esc(e.message)}</p><button class="secondary" data-action="close">Close</button>`;
   }
 }
+document.addEventListener("change", async (e) => {
+  const toggle = e.target.closest("[data-manual-backup]");
+  if (!toggle || toggle.disabled) return;
+  const name = toggle.dataset.name;
+  manualSelectionsSaving.set(name, toggle.checked);
+  renderStacks();
+  try {
+    const result = await api(`/stacks/${encodeURIComponent(name)}/manual-backup`, "PUT", {
+      include_in_manual_backup: toggle.checked,
+    });
+    const stack = state && getStack(name);
+    if (stack) stack.include_in_manual_backup = result.include_in_manual_backup;
+    await refresh(true);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    manualSelectionsSaving.delete(name);
+    if (state) renderStacks();
+  }
+});
 document.addEventListener("click", async (e) => {
   const b = e.target.closest("[data-action]");
   if (!b || b.disabled) return;
@@ -550,6 +584,23 @@ $("refresh").onclick = () =>
   refresh()
     .then(() => toast("Stack discovery refreshed."))
     .catch((e) => toast(e.message, true));
+$("backup-selected").onclick = async () => {
+  if ($("backup-selected").disabled) return;
+  manualBackupBusy = true;
+  renderStacks();
+  try {
+    const result = await api("/backups/manual", "POST");
+    state.busy = true;
+    toast(`${result.count} selected stack${result.count === 1 ? "" : "s"} queued. Follow progress in Activity.`);
+    location.hash = "activity";
+    await refresh(true);
+  } catch (e) {
+    toast(e.message, true);
+  } finally {
+    manualBackupBusy = false;
+    if (state) renderStacks();
+  }
+};
 $("stack-search").oninput = renderStacks;
 $("mapping-search").oninput = renderRules;
 $("new-rule").onclick = () => ruleDialog();

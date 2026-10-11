@@ -163,27 +163,56 @@ class BackupEngine:
                 break
 
     def submit(self, stack, scheduled=False):
+        job_ids = self.submit_many([stack], scheduled=scheduled)
+        return job_ids[0] if job_ids else None
+
+    def submit_many(self, stacks, scheduled=False):
+        stacks = list(dict.fromkeys(stacks))
+        if not stacks:
+            raise BackupError("Select at least one stack to back up.")
         if self.cancelled.is_set() or not self.lock.acquire(blocking=False):
             if scheduled:
                 return None
             raise BackupError("Another backup or recovery is in progress. Try again shortly.")
+        jobs = []
         try:
             if self.store.rows("SELECT 1 FROM restart_journal"):
                 raise BackupError("Container restart recovery needs attention before another backup can run.")
-            job_id = uuid.uuid4().hex
-            self.store.execute("INSERT INTO jobs (id,stack,status,started) VALUES (?,?,?,?)",
-                               (job_id, stack, "queued", utcnow().isoformat()))
-            self.pool.submit(self._work, job_id, stack)
-            return job_id
+            jobs = [(uuid.uuid4().hex, stack) for stack in stacks]
+            with self.store.db() as db:
+                db.executemany("INSERT INTO jobs (id,stack,status,started) VALUES (?,?,?,?)",
+                               [(job_id, stack, "queued", utcnow().isoformat()) for job_id, stack in jobs])
+            self.pool.submit(self._work_many, jobs)
+            return [job_id for job_id, stack in jobs]
         except Exception:
-            self.lock.release()
+            try:
+                for job_id, stack in jobs:
+                    self.store.job_update(job_id, status="failed", finished=utcnow().isoformat(),
+                                          detail="Could not queue the backup. Try again shortly.")
+            finally:
+                self.lock.release()
             raise
 
-    def _work(self, job_id, stack):
+    def _work_many(self, jobs):
         try:
-            self.run(job_id, stack)
+            for job_id, stack in jobs:
+                if self.cancelled.is_set():
+                    self.store.job_update(job_id, status="interrupted", finished=utcnow().isoformat(),
+                                          detail="App stopped before this selected backup could start.")
+                elif self.store.rows("SELECT 1 FROM restart_journal"):
+                    self.store.job_update(job_id, status="failed", finished=utcnow().isoformat(),
+                                          detail="Selected backup did not start because container restart recovery needs attention.")
+                else:
+                    self.run(job_id, stack)
         finally:
-            self.lock.release()
+            try:
+                # Unexpected worker failures must not leave the rest of a batch queued forever.
+                with self.store.db() as db:
+                    db.executemany("UPDATE jobs SET status='interrupted',finished=?,detail=? WHERE id=? AND status IN ('queued','running','uploading')",
+                                   [(utcnow().isoformat(), "Backup worker stopped before this backup finished. Check restart recovery before trying again.", job_id)
+                                    for job_id, stack in jobs])
+            finally:
+                self.lock.release()
 
     def run(self, job_id, name):
         partial = self.archive_dir / (job_id + ".partial")

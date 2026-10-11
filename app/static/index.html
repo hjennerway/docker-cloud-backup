@@ -104,7 +104,10 @@
                   Back up the config that makes your containers yours.
                 </p>
               </div>
-              <button id="refresh" class="secondary">↻ Refresh stacks</button>
+              <div class="page-heading-actions">
+                <button id="backup-selected" class="primary" disabled aria-describedby="manual-backup-hint">Backup 0 selected</button>
+                <button id="refresh" class="secondary">↻ Refresh stacks</button>
+              </div>
             </div>
             <div class="metrics" id="metrics"></div>
             <div class="section-heading">
@@ -126,6 +129,9 @@
                   type="search"
               /></label>
             </div>
+            <p id="manual-backup-hint" class="manual-backup-hint muted" role="status">
+              Include stacks in manual backup below. Selected stacks run one at a time, stopping and restarting their running containers.
+            </p>
             <div id="stacks-list" class="stack-table"></div>
             <div class="info-strip">
               <span class="info-icon">i</span>

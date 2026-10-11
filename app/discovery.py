@@ -370,8 +370,10 @@ class Discovery:
         if stack_name is not None:
             stacks = {name: stack for name, stack in stacks.items() if name == stack_name}
         schedules = {s["stack"]: s for s in self.store.rows("SELECT * FROM schedules")}
+        manual_stacks = self.store.manual_backup_stacks()
         for stack in stacks.values():
             stack["schedule"] = schedules.get(stack["name"], {"cron": "0 3 * * *", "timezone": os.getenv("TZ", "UTC"), "enabled": False, "next_run": None})
+            stack["include_in_manual_backup"] = stack["name"] in manual_stacks and not stack["excluded"]
             stack["issues"] = []
             if stack["excluded"]:
                 stack["issues"].append("Excluded: contains the backup app or an explicitly excluded service.")

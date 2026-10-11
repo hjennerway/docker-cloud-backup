@@ -259,6 +259,16 @@ main {
   margin-top: 12px;
   font-size: 13px;
 }
+.page-heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+.manual-backup-hint {
+  font-size: 11px;
+  margin: -4px 0 16px;
+}
 .primary,
 .secondary {
   padding: 12px 17px;
@@ -367,10 +377,10 @@ main {
 .table-head,
 .stack-row {
   display: grid;
-  grid-template-columns: minmax(140px, 1fr) minmax(140px, 0.9fr) minmax(180px, 1.4fr) minmax(125px, 0.9fr) 150px;
-  min-width: 840px;
+  grid-template-columns: minmax(130px, 1fr) minmax(130px, 0.9fr) minmax(160px, 1.4fr) minmax(110px, 0.9fr) 125px 140px;
+  min-width: 930px;
   align-items: center;
-  gap: 17px;
+  gap: 14px;
   padding: 19px 23px;
 }
 .table-head {
@@ -452,6 +462,51 @@ main {
 }
 .mobile-label {
   display: none;
+}
+.manual-backup-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.5;
+  font-weight: 500;
+  cursor: pointer;
+}
+.manual-backup-toggle input {
+  appearance: none;
+  position: relative;
+  flex-shrink: 0;
+  width: 32px;
+  height: 18px;
+  padding: 0;
+  margin: 0;
+  border-radius: 20px;
+  border: 1px solid #becdc7;
+  background: #dbe5e0;
+  cursor: pointer;
+}
+.manual-backup-toggle input::before {
+  content: "";
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  top: 2px;
+  left: 2px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 0.15s;
+}
+.manual-backup-toggle input:checked {
+  background: var(--teal);
+  border-color: var(--teal);
+}
+.manual-backup-toggle input:checked::before {
+  transform: translateX(14px);
+}
+.manual-backup-toggle input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 .badge {
   display: inline-flex;
@@ -1103,7 +1158,7 @@ dialog::backdrop {
   }
   .table-head,
   .stack-row {
-    grid-template-columns: minmax(130px, 1fr) 140px minmax(180px, 1.4fr) 125px 112px;
+    grid-template-columns: minmax(130px, 1fr) 140px minmax(180px, 1.4fr) 125px 130px 112px;
     gap: 10px;
     padding-left: 17px;
     padding-right: 17px;
@@ -1180,7 +1235,11 @@ dialog::backdrop {
   }
   .page-heading {
     align-items: flex-start;
+    flex-wrap: wrap;
     gap: 15px;
+  }
+  .page-heading-actions {
+    justify-content: flex-start;
   }
   .page-heading > button {
     padding: 10px;
@@ -1232,6 +1291,12 @@ dialog::backdrop {
   }
   .volumes-cell {
     grid-column: 1 / -1;
+    border-top: 1px solid var(--line);
+    padding-top: 12px;
+  }
+  .manual-backup-cell {
+    grid-column: 1 / -1;
+    grid-row: 4;
     border-top: 1px solid var(--line);
     padding-top: 12px;
   }

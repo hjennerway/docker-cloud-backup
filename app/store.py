@@ -71,6 +71,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS schedules (stack TEXT PRIMARY KEY, cron TEXT NOT NULL,
                     timezone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, next_run TEXT);
                 CREATE TABLE IF NOT EXISTS backup_selections (stack TEXT PRIMARY KEY, selection TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS manual_backup_stacks (stack TEXT PRIMARY KEY);
                 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, stack TEXT NOT NULL,
                     status TEXT NOT NULL, started TEXT NOT NULL, finished TEXT, detail TEXT,
                     archive TEXT, size INTEGER DEFAULT 0, sha256 TEXT, receipts TEXT DEFAULT '{}',
@@ -147,6 +148,15 @@ class Store:
 
     def save_backup_selection(self, stack, selection):
         self.execute("INSERT OR REPLACE INTO backup_selections VALUES (?,?)", (stack, json.dumps(selection)))
+
+    def manual_backup_stacks(self):
+        return {row["stack"] for row in self.rows("SELECT stack FROM manual_backup_stacks")}
+
+    def save_manual_backup(self, stack, included):
+        if included:
+            self.execute("INSERT OR IGNORE INTO manual_backup_stacks VALUES (?)", (stack,))
+        else:
+            self.execute("DELETE FROM manual_backup_stacks WHERE stack=?", (stack,))
 
     def job_update(self, job_id, **values):
         allowed = {"status", "finished", "detail", "archive", "size", "sha256", "receipts", "notification_error"}

@@ -117,6 +117,202 @@ def run_backup(f):
     return f.store.rows("SELECT * FROM jobs WHERE id='job'")[0]
 
 
+def add_stack(f, name):
+    folder = f.folder.parent / name
+    folder.mkdir()
+    (folder / "compose.yaml").write_text(f"services:\n  {name}:\n    image: test/service\n")
+    container = FakeContainer(name, f.events)
+    container.labels.update({"com.docker.compose.project": name,
+                             "com.docker.compose.project.config_files": f"/stacks/{name}/compose.yaml",
+                             "com.docker.compose.project.working_dir": f"/stacks/{name}"})
+    f.client.items[container.id] = container
+    return container
+
+
+def test_manual_backup_preferences_persist_independently(fixture):
+    f = fixture
+    assert f.discovery.get("sample")["include_in_manual_backup"] is False
+    selection = {"mode": "manual", "volumes": [], "paths": {"web": ["/config/settings.json"]}}
+    f.store.save_backup_selection("sample", selection)
+    f.store.execute("INSERT INTO schedules VALUES (?,?,?,?,?)", ("sample", "0 3 * * *", "UTC", 1, next_run("0 3 * * *", "UTC")))
+    f.store.save_manual_backup("sample", True)
+    f.store.save_manual_backup("sample", True)
+    reopened = Store(f.store.root)
+    assert reopened.manual_backup_stacks() == {"sample"}
+    assert f.discovery.get("sample")["include_in_manual_backup"] is True
+    reopened.save_manual_backup("sample", False)
+    assert f.discovery.get("sample")["include_in_manual_backup"] is False
+    assert reopened.backup_selection("sample") == selection
+    assert reopened.rows("SELECT enabled FROM schedules")[0]["enabled"] == 1
+
+
+def test_selected_backups_run_in_sequence_and_deduplicate(fixture):
+    f = fixture
+    other = add_stack(f, "other")
+    jobs = f.engine.submit_many(["sample", "other", "sample"])
+    f.engine.pool.submit(lambda: None).result(timeout=5)
+    assert len(jobs) == 2
+    assert [f.store.rows("SELECT * FROM jobs WHERE id=?", (job,))[0]["status"] for job in jobs] == ["success", "success"]
+    assert f.events.index("start:web") < f.events.index("upload") < f.events.index("stop:other")
+    assert f.events.index("start:other") < len(f.events) - 1
+    assert f.events[-1] == "upload"
+    assert f.stopped.status == "exited" and other.status == "running"
+    assert not f.engine.lock.locked()
+
+
+def test_selected_backups_continue_after_a_safe_failure(fixture):
+    f = fixture
+    add_stack(f, "other")
+    f.web.fail_archive = True
+    jobs = f.engine.submit_many(["sample", "other"])
+    f.engine.pool.submit(lambda: None).result(timeout=5)
+    assert [f.store.rows("SELECT status FROM jobs WHERE id=?", (job,))[0]["status"] for job in jobs] == ["failed", "success"]
+    assert f.web.status == "running"
+    assert f.events.index("start:web") < f.events.index("stop:other")
+
+
+def test_selected_backups_stop_when_restart_recovery_is_needed(fixture):
+    f = fixture
+    add_stack(f, "other")
+    f.web.fail_start = True
+    jobs = f.engine.submit_many(["sample", "other"])
+    f.engine.pool.submit(lambda: None).result(timeout=5)
+    records = [f.store.rows("SELECT * FROM jobs WHERE id=?", (job,))[0] for job in jobs]
+    assert [job["status"] for job in records] == ["failed", "failed"]
+    assert "recovery" in records[1]["detail"] and records[1]["finished"]
+    assert f.store.rows("SELECT * FROM restart_journal")
+    assert "stop:other" not in f.events
+    assert not f.engine.lock.locked()
+
+
+def test_selected_backups_hold_the_worker_for_the_entire_batch(fixture, monkeypatch):
+    f = fixture
+    entered, proceed = threading.Event(), threading.Event()
+    def run(job_id, stack):
+        entered.set()
+        assert proceed.wait(5)
+        f.store.job_update(job_id, status="success")
+    monkeypatch.setattr(f.engine, "run", run)
+    try:
+        jobs = f.engine.submit_many(["sample", "other"])
+        assert entered.wait(5)
+        assert len(f.store.rows("SELECT * FROM jobs WHERE status='queued'")) == 2
+        with pytest.raises(BackupError, match="in progress"):
+            f.engine.submit("third")
+        assert f.engine.submit("scheduled", scheduled=True) is None
+        assert len(f.store.rows("SELECT * FROM jobs")) == len(jobs)
+    finally:
+        proceed.set()
+    f.engine.pool.submit(lambda: None).result(timeout=5)
+    assert not f.engine.lock.locked()
+
+
+def test_shutdown_does_not_start_the_remaining_selected_stacks(fixture, monkeypatch):
+    f = fixture
+    started = []
+    def run(job_id, stack):
+        started.append(stack)
+        f.store.job_update(job_id, status="success")
+        f.engine.cancelled.set()
+    monkeypatch.setattr(f.engine, "run", run)
+    jobs = f.engine.submit_many(["sample", "other"])
+    f.engine.pool.submit(lambda: None).result(timeout=5)
+    assert started == ["sample"]
+    assert f.store.rows("SELECT status,finished FROM jobs WHERE id=?", (jobs[1],))[0]["status"] == "interrupted"
+    assert not f.engine.lock.locked()
+
+
+def test_unexpected_worker_failure_does_not_leave_selected_jobs_queued(fixture, monkeypatch):
+    def run(job_id, stack):
+        fixture.store.job_update(job_id, status="running")
+        raise RuntimeError("worker failure")
+    monkeypatch.setattr(fixture.engine, "run", run)
+    jobs = fixture.engine.submit_many(["sample", "other"])
+    fixture.engine.pool.submit(lambda: None).result(timeout=5)
+    assert len(fixture.store.rows("SELECT * FROM jobs WHERE status='interrupted' AND finished IS NOT NULL")) == len(jobs)
+    assert not fixture.engine.lock.locked()
+
+
+def test_manual_batch_submission_rejects_recovery_without_creating_jobs(fixture):
+    fixture.store.execute("INSERT INTO restart_journal VALUES (?,?,?)", ("web", "web", "previous"))
+    with pytest.raises(BackupError, match="recovery"):
+        fixture.engine.submit_many(["sample", "other"])
+    assert not fixture.store.rows("SELECT * FROM jobs")
+    assert not fixture.engine.lock.locked()
+
+
+def test_manual_batch_submission_records_queue_failures(fixture, monkeypatch):
+    def submit(*args):
+        raise RuntimeError("executor unavailable")
+    monkeypatch.setattr(fixture.engine.pool, "submit", submit)
+    with pytest.raises(RuntimeError, match="executor unavailable"):
+        fixture.engine.submit_many(["sample", "other"])
+    jobs = fixture.store.rows("SELECT * FROM jobs")
+    assert len(jobs) == 2 and all(job["status"] == "failed" and job["finished"] for job in jobs)
+    assert not fixture.engine.lock.locked()
+
+
+def test_manual_backup_api_selects_only_marked_stacks_and_validates(fixture):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    f = fixture
+    add_stack(f, "other")
+    excluded = add_stack(f, "excluded")
+    excluded.labels["cloud-backup.exclude"] = "true"
+    app = create_app(f.store, f.client, start_worker=False)
+    app.state.engine = f.engine
+    headers = {"X-Requested-With": "cloud-backup"}
+    endpoint = "/api/stacks/sample/manual-backup"
+    with TestClient(app) as client:
+        assert client.put(endpoint, json={"include_in_manual_backup": True}, headers=headers).status_code == 401
+        assert client.post("/api/backups/manual", headers=headers).status_code == 401
+        client.post("/api/login", json={"password": "test-password-only"}, headers=headers)
+        assert client.post("/api/backups/manual").status_code == 403
+        assert client.post("/api/backups/manual", headers=headers).status_code == 400
+        assert client.put(endpoint, json={"include_in_manual_backup": "yes"}, headers=headers).status_code == 422
+        assert client.put("/api/stacks/missing/manual-backup", json={"include_in_manual_backup": True}, headers=headers).status_code == 400
+        assert client.put("/api/stacks/excluded/manual-backup", json={"include_in_manual_backup": True}, headers=headers).status_code == 400
+        assert client.put(endpoint, json={"include_in_manual_backup": True}, headers=headers).status_code == 200
+        f.store.save_manual_backup("excluded", True)  # A previously selected stack can become excluded.
+        stacks = client.get("/api/dashboard").json()["stacks"]
+        assert [s["name"] for s in stacks if s["include_in_manual_backup"]] == ["sample"]
+        response = client.post("/api/backups/manual", headers=headers)
+        assert response.status_code == 200 and response.json()["count"] == 1
+        f.engine.pool.submit(lambda: None).result(timeout=5)
+        assert [row["stack"] for row in f.store.rows("SELECT * FROM jobs")] == ["sample"]
+        assert client.put(endpoint, json={"include_in_manual_backup": False}, headers=headers).status_code == 200
+        assert client.post("/api/backups/manual", headers=headers).status_code == 400
+
+
+def test_manual_backup_api_preflights_all_selected_stacks(fixture):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    f = fixture
+    other = add_stack(f, "other")
+    other.attrs["Config"]["Image"] = "unknown/image:latest"
+    app = create_app(f.store, f.client, start_worker=False)
+    app.state.engine = f.engine
+    headers = {"X-Requested-With": "cloud-backup"}
+    with TestClient(app) as client:
+        client.post("/api/login", json={"password": "test-password-only"}, headers=headers)
+        for name in ("sample", "other"):
+            assert client.put(f"/api/stacks/{name}/manual-backup", json={"include_in_manual_backup": True}, headers=headers).status_code == 200
+        response = client.post("/api/backups/manual", headers=headers)
+        assert response.status_code == 400 and "other" in response.json()["detail"]
+        assert not f.store.rows("SELECT * FROM jobs") and f.events == []
+        other.attrs["Config"]["Image"] = "test/service:latest"
+        f.engine.lock.acquire()
+        try:
+            assert client.post("/api/backups/manual", headers=headers).status_code == 400
+            assert not f.store.rows("SELECT * FROM jobs")
+        finally:
+            f.engine.lock.release()
+        response = client.post("/api/backups/manual", headers=headers)
+        assert response.status_code == 200 and response.json()["count"] == 2
+        f.engine.pool.submit(lambda: None).result(timeout=5)
+        assert {row["stack"] for row in f.store.rows("SELECT * FROM jobs")} == {"sample", "other"}
+
+
 def test_backup_contains_only_mapped_config_and_compose(fixture):
     f = fixture
     job = run_backup(f)

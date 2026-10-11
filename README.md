@@ -20,6 +20,8 @@ Open `http://YOUR_DOCKER_HOST:8088` and sign in. The generated password file exi
 3. Run a manual backup and check Activity. Download and test restoring a small archive.
 4. Enable a cron schedule for each stack you want protected.
 
+On **Stacks**, turn on **Include in manual backup** for each stack you want to run together, then click **Backup N selected** at the top. Selections start off and persist across refreshes and app restarts, independently of schedules and backup contents. The button includes selected stacks hidden by search and queues a separate backup for each, running one stack at a time. Review any selected stack with config issues before starting. If a container cannot restart, remaining selected backups do not start until recovery is resolved; run the selection again after recovery.
+
 The app uses the local Docker socket. A second Dockge agent is a separate Docker host: deploy another instance there to protect its containers.
 
 ## Dockge

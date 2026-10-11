@@ -47,6 +47,10 @@ class BackupSelection(BaseModel):
     paths: dict[str, list[str]] = Field(default_factory=dict, max_length=100)
 
 
+class ManualBackupPreference(BaseModel):
+    include_in_manual_backup: StrictBool
+
+
 def create_app(store=None, client=None, start_worker=True):
     store = store or Store(os.getenv("DATA_DIR", "/data"))
     serializer = URLSafeTimedSerializer(store.cipher._signing_key, salt="cloud-backup-session-v1")
@@ -208,6 +212,27 @@ def create_app(store=None, client=None, start_worker=True):
         if stack["issues"]:
             raise BackupError(" ".join(stack["issues"]))
         return {"job_id": engine().submit(name)}
+
+    @app.put("/api/stacks/{name:path}/manual-backup")
+    def save_manual_backup(name: str, body: ManualBackupPreference):
+        stack = engine().discovery.get(name)
+        if body.include_in_manual_backup and stack["excluded"]:
+            raise BackupError("Excluded stacks cannot be included in manual backup.")
+        store.save_manual_backup(name, body.include_in_manual_backup)
+        return {"include_in_manual_backup": body.include_in_manual_backup}
+
+    @app.post("/api/backups/manual")
+    def backup_selected():
+        worker = engine()
+        stacks = [stack for stack in worker.discovery.stacks(include_sizes=False)
+                  if stack["include_in_manual_backup"]]
+        if not stacks:
+            raise BackupError("Select at least one stack to include in manual backup.")
+        issues = [stack["name"] + ": " + " ".join(stack["issues"]) for stack in stacks if stack["issues"]]
+        if issues:
+            raise BackupError("Review the selected stacks before backing up. " + " ".join(issues))
+        job_ids = worker.submit_many([stack["name"] for stack in stacks])
+        return {"job_ids": job_ids, "count": len(job_ids)}
 
     @app.put("/api/stacks/{name:path}/selection")
     def save_selection(name: str, body: BackupSelection):
