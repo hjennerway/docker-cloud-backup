@@ -77,10 +77,19 @@ class Destinations:
         except FileNotFoundError:
             raise BackupError("rclone is missing. Use the supplied container image.") from None
         except subprocess.TimeoutExpired:
-            raise BackupError("Destination timed out. The local backup has been kept.") from None
+            raise BackupError("Destination timed out. Check network connectivity and try again.") from None
         if p.returncode:
             # Provider errors can contain tokens, URLs and credentials. Keep them
-            # out of logs and UI; the destination test narrows down the failure.
+            # out of logs and UI; return only fixed, safe classifications.
+            error = p.stderr.lower()
+            if any(text in error for text in ("logon is invalid", "logon failure", "status_logon_failure", "bad username or authentication")):
+                raise BackupError("SMB login was rejected. Check the username, password and domain.")
+            if any(text in error for text in ("invalid_grant", "token has been expired or revoked", "failed to refresh token")):
+                raise BackupError("Google Drive authorization expired or was revoked. Reconnect Google Drive.")
+            if any(text in error for text in ("permission denied", "access is denied", "status_access_denied", "insufficientfilepermissions")):
+                raise BackupError("The destination denied access. Check the account's permission to the chosen folder.")
+            if any(text in error for text in ("no such host", "connection refused", "network is unreachable", "i/o timeout")):
+                raise BackupError("The destination could not be reached. Check the server address and network.")
             raise BackupError("Destination operation failed. Check credentials, folder access, network and available space.")
         return p.stdout
 

@@ -573,10 +573,16 @@ $("browse-drive").onclick = () => {
 for (const provider of ["smb", "drive"]) {
   $("test-" + provider).onclick = async (e) => {
     e.target.disabled = true;
+    const feedback = $(provider + "-test-result");
+    feedback.className = "hint";
+    feedback.textContent = "Checking the saved connection…";
     try {
       const result = await api(`/destinations/${provider}/test`, "POST");
+      feedback.textContent = result.message;
       toast(result.message);
     } catch (e) {
+      feedback.className = "hint error";
+      feedback.textContent = e.message;
       toast(e.message, true);
     } finally {
       e.target.disabled = false;
