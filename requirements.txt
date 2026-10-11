@@ -1,3 +1,4 @@
+-c requirements.lock
 fastapi==0.143.0
 uvicorn==0.54.0
 docker==7.1.0
