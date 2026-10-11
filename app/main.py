@@ -1,0 +1,333 @@
+import hashlib
+import hmac
+import json
+import os
+import secrets
+import threading
+import time
+from contextlib import asynccontextmanager
+from datetime import timedelta
+from pathlib import Path
+from urllib.parse import urlencode, urlparse
+
+import docker
+import requests
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from itsdangerous import BadSignature, URLSafeTimedSerializer
+from pydantic import BaseModel, Field, StrictBool
+
+from .backup import BackupEngine, next_run, utcnow
+from .destinations import Destinations, notify, validate_settings
+from .discovery import BackupError, Discovery, validate_rule
+from .store import DEFAULTS, SECRETS, Store
+
+
+class Login(BaseModel):
+    password: str = Field(max_length=1024)
+
+
+class Schedule(BaseModel):
+    cron: str = Field(max_length=100)
+    timezone: str = Field(max_length=100)
+    enabled: StrictBool = False
+
+
+class Rule(BaseModel):
+    pattern: str
+    paths: list[str]
+    excludes: list[str] = []
+
+
+def create_app(store=None, client=None, start_worker=True):
+    store = store or Store(os.getenv("DATA_DIR", "/data"))
+    serializer = URLSafeTimedSerializer(store.cipher._signing_key, salt="cloud-backup-session-v1")
+    password = os.getenv("ADMIN_PASSWORD", "")
+    if not password:
+        password_file = store.root / "admin-password.txt"
+        if not password_file.exists():
+            password_file.write_text(secrets.token_urlsafe(24))
+            password_file.chmod(0o600)
+        password = password_file.read_text().strip()
+    password_digest = hashlib.sha256(password.encode()).digest()
+    attempts, attempt_lock = {}, threading.Lock()
+
+    app = FastAPI(title="Docker Cloud Backup", docs_url=None, redoc_url=None, openapi_url=None)
+    app.state.store, app.state.client, app.state.engine = store, client, None
+    app.state.init_lock = threading.Lock()
+    app.state.destinations = Destinations(store)
+
+    def engine():
+        with app.state.init_lock:
+            if app.state.engine is None:
+                try:
+                    if app.state.client is None:
+                        app.state.client = docker.from_env(timeout=120)
+                    discovery = Discovery(app.state.client, store, os.getenv("HOST_ROOT", "/host"), os.getenv("STACKS_ROOT", "/opt/stacks"))
+                    app.state.engine = BackupEngine(store, discovery, app.state.destinations)
+                    if start_worker:
+                        app.state.engine.start()
+                except Exception as exc:
+                    app.state.engine = None
+                    raise BackupError("Docker is unavailable. Check the socket mount and Docker daemon.") from exc
+            return app.state.engine
+
+    # Scheduler must run before anyone visits the UI and retry if Docker was down
+    # at startup. Initialization happens in its own thread, outside the ASGI loop.
+    boot_stop = threading.Event()
+
+    @asynccontextmanager
+    async def full_lifespan(app):
+        def bootstrap():
+            while not boot_stop.is_set():
+                try:
+                    engine()
+                    return
+                except BackupError:
+                    boot_stop.wait(10)
+        worker = None
+        if start_worker:
+            worker = threading.Thread(target=bootstrap, name="bootstrap", daemon=True)
+            worker.start()
+        yield
+        boot_stop.set()
+        if worker:
+            worker.join(timeout=5)
+        if app.state.engine:
+            app.state.engine.close()
+        if app.state.client:
+            app.state.client.close()
+    app.router.lifespan_context = full_lifespan
+
+    def session(request):
+        try:
+            data = serializer.loads(request.cookies.get("session", ""), max_age=43200)
+            if not hmac.compare_digest(data.get("auth", ""), password_digest.hex()):
+                return None
+            return data
+        except (BadSignature, ValueError):
+            return None
+
+    @app.middleware("http")
+    async def protect(request, call_next):
+        if request.url.path.startswith("/api/") and request.url.path not in {"/api/login", "/api/session"} and not session(request):
+            return JSONResponse({"detail": "Sign in to continue."}, status_code=401)
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"}:
+            origin = request.headers.get("origin")
+            if request.headers.get("x-requested-with") != "cloud-backup" or (origin and urlparse(origin).netloc != request.headers.get("host")):
+                return JSONResponse({"detail": "Request origin rejected."}, status_code=403)
+            if int(request.headers.get("content-length", 0)) > 100000:
+                return JSONResponse({"detail": "Request is too large."}, status_code=413)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["Content-Security-Policy"] = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+        response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(BackupError)
+    async def backup_error(request, exc):
+        return JSONResponse({"detail": str(exc)}, status_code=400)
+
+    @app.get("/healthz")
+    def health():
+        return {"status": "ok"}
+
+    @app.get("/api/session")
+    def current_session(request: Request):
+        return {"authenticated": bool(session(request))}
+
+    @app.post("/api/login")
+    def login(body: Login, request: Request):
+        address = request.client.host if request.client else "unknown"
+        with attempt_lock:
+            now = time.monotonic()
+            failures = [t for t in attempts.get(address, []) if now - t < 300]
+            if len(failures) >= 10:
+                raise HTTPException(429, "Too many attempts. Try again in five minutes.")
+            if not hmac.compare_digest(hashlib.sha256(body.password.encode()).digest(), password_digest):
+                attempts[address] = failures + [now]
+                raise HTTPException(401, "Incorrect password.")
+            attempts.pop(address, None)
+        response = JSONResponse({"ok": True})
+        response.set_cookie("session", serializer.dumps({"auth": password_digest.hex(), "id": secrets.token_hex(16)}),
+                            httponly=True, samesite="lax", secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", max_age=43200)
+        return response
+
+    @app.post("/api/logout")
+    def logout():
+        response = JSONResponse({"ok": True})
+        response.delete_cookie("session")
+        return response
+
+    @app.get("/api/dashboard")
+    def dashboard():
+        error, stacks = None, []
+        try:
+            stacks = engine().discovery.stacks()
+        except BackupError as exc:
+            error = str(exc)
+        jobs = store.rows("SELECT * FROM jobs ORDER BY started DESC LIMIT 100")
+        return {"stacks": stacks, "jobs": jobs, "docker_error": error,
+                "recovery": store.rows("SELECT name,job_id FROM restart_journal"),
+                "settings": store.settings(redacted=True), "rules": store.rules(),
+                "busy": bool(app.state.engine and app.state.engine.lock.locked()),
+                "timezone": os.getenv("TZ", "UTC")}
+
+    @app.put("/api/stacks/{name:path}/schedule")
+    def save_schedule(name: str, body: Schedule):
+        due = next_run(body.cron, body.timezone)
+        stack = engine().discovery.get(name)
+        if body.enabled and stack["issues"]:
+            raise BackupError("Resolve this stack's config issues before enabling its schedule.")
+        store.execute("INSERT OR REPLACE INTO schedules VALUES (?,?,?,?,?)", (name, body.cron, body.timezone, int(body.enabled), due if body.enabled else None))
+        return {"ok": True, "next_run": due}
+
+    @app.post("/api/cron/preview")
+    def cron_preview(body: Schedule):
+        from datetime import datetime
+        dates, after = [], utcnow()
+        for _ in range(5):
+            due = next_run(body.cron, body.timezone, after)
+            dates.append(due)
+            after = datetime.fromisoformat(due)
+        return {"dates": dates}
+
+    @app.post("/api/stacks/{name:path}/backup")
+    def backup_stack(name: str):
+        stack = engine().discovery.get(name)
+        if stack["issues"]:
+            raise BackupError(" ".join(stack["issues"]))
+        return {"job_id": engine().submit(name)}
+
+    @app.post("/api/jobs/{job_id}/retry")
+    def retry(job_id: str):
+        engine().retry_upload(job_id)
+        return {"ok": True}
+
+    @app.get("/api/jobs/{job_id}/download")
+    def download(job_id: str):
+        rows = store.rows("SELECT archive FROM jobs WHERE id=?", (job_id,))
+        if not rows or not rows[0]["archive"]:
+            raise HTTPException(404, "Archive not available.")
+        path = store.root / "archives" / rows[0]["archive"]
+        if not path.is_file():
+            raise HTTPException(404, "Archive not available.")
+        return FileResponse(path, filename=path.name, media_type="application/gzip")
+
+    @app.put("/api/rules")
+    def save_rule(body: Rule):
+        validate_rule(body.pattern, body.paths, body.excludes)
+        store.execute("INSERT OR REPLACE INTO rules VALUES (?,?,?)", (body.pattern, json.dumps(body.paths), json.dumps(body.excludes)))
+        return {"ok": True}
+
+    @app.delete("/api/rules/{pattern:path}")
+    def delete_rule(pattern: str):
+        store.execute("DELETE FROM rules WHERE pattern=?", (pattern,))
+        return {"ok": True}
+
+    @app.put("/api/settings")
+    def save_settings(body: dict):
+        unknown = set(body) - set(DEFAULTS)
+        if unknown:
+            raise BackupError("Unknown setting.")
+        current = store.settings()
+        for key, value in body.items():
+            if type(value) is not type(DEFAULTS[key]):
+                raise BackupError("Invalid setting type: " + key)
+            # Empty secret fields preserve the stored value; disconnect is explicit.
+            if key in SECRETS and not value:
+                continue
+            if key == "drive_token":
+                try:
+                    value = json.dumps(json.loads(value))
+                except ValueError:
+                    raise BackupError("Invalid Google Drive token JSON.") from None
+            current[key] = value
+        validate_settings(current)
+        with app.state.destinations.lock:
+            store.save_settings({key: current[key] for key in body if key not in SECRETS or body[key]})
+        return store.settings(redacted=True)
+
+    @app.post("/api/destinations/{provider}/test")
+    def test_destination(provider: str):
+        return app.state.destinations.test(provider)
+
+    @app.get("/api/drive/folders")
+    def drive_folders(parent: str = "root"):
+        return {"folders": app.state.destinations.folders(parent)}
+
+    @app.post("/api/drive/disconnect")
+    def disconnect():
+        with app.state.destinations.lock:
+            store.save_settings({"drive_enabled": False, "drive_token": "", "drive_folder_id": "", "drive_folder_name": ""})
+        return {"ok": True}
+
+    @app.post("/api/notifications/test")
+    def test_notification():
+        settings = store.settings()
+        if settings["notification_type"] == "none":
+            raise BackupError("Choose and save a notification service first.")
+        notify(settings, "Cloud Backup test", "Your backup notifications are connected.")
+        return {"message": "Test notification sent."}
+
+    @app.post("/api/drive/connect")
+    def drive_connect(request: Request):
+        s = store.settings()
+        uri = urlparse(s["oauth_redirect_uri"])
+        if not s["drive_client_id"] or not s["drive_client_secret"]:
+            raise BackupError("Enter your Google Web OAuth client ID and secret, or use the LAN token connection below.")
+        if uri.scheme != "https" and not (uri.scheme == "http" and uri.hostname in {"localhost", "127.0.0.1"}):
+            raise BackupError("Google browser sign-in needs an HTTPS hostname or localhost. Use the LAN token connection for a private IP address.")
+        if uri.path != "/oauth/google/callback" or uri.query or uri.fragment or uri.username:
+            raise BackupError("Redirect URL must end with /oauth/google/callback.")
+        state = secrets.token_urlsafe(32)
+        bound = hashlib.sha256((state + session(request)["id"]).encode()).hexdigest()
+        store.execute("DELETE FROM oauth_states WHERE expires<?", (time.time(),))
+        store.execute("INSERT INTO oauth_states VALUES (?,?)", (bound, time.time() + 600))
+        return {"url": "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
+            "client_id": s["drive_client_id"], "redirect_uri": s["oauth_redirect_uri"],
+            "response_type": "code", "scope": "https://www.googleapis.com/auth/drive",
+            "access_type": "offline", "prompt": "consent", "state": state,
+        })}
+
+    @app.get("/oauth/google/callback")
+    def drive_callback(request: Request, state: str = "", code: str = "", error: str = ""):
+        user = session(request)
+        if not user or not state:
+            raise HTTPException(400, "Sign in on the configured redirect hostname before connecting Google Drive.")
+        bound = hashlib.sha256((state + user["id"]).encode()).hexdigest()
+        with store.db() as db:
+            exists = db.execute("SELECT 1 FROM oauth_states WHERE state=? AND expires>?", (bound, time.time())).fetchone()
+            db.execute("DELETE FROM oauth_states WHERE state=?", (bound,))
+        if not exists or error or not code:
+            raise HTTPException(400, "Google connection was cancelled or expired. Start again from Destinations.")
+        s = store.settings()
+        try:
+            response = requests.post("https://oauth2.googleapis.com/token", data={
+                "code": code, "client_id": s["drive_client_id"], "client_secret": s["drive_client_secret"],
+                "redirect_uri": s["oauth_redirect_uri"], "grant_type": "authorization_code",
+            }, timeout=30)
+            response.raise_for_status()
+            token = response.json()
+            if not token.get("refresh_token"):
+                raise ValueError()
+            token["expiry"] = (utcnow() + timedelta(seconds=token.get("expires_in", 3600))).isoformat()
+            with app.state.destinations.lock:
+                store.save_settings({"drive_token": json.dumps(token), "drive_enabled": False, "drive_folder_id": "", "drive_folder_name": ""})
+        except (requests.RequestException, ValueError):
+            raise HTTPException(400, "Google token exchange failed. Check the OAuth client and redirect URL.") from None
+        return RedirectResponse("/#destinations", status_code=303)
+
+    app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+    @app.get("/")
+    def index():
+        return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+    return app
+
+
+app = create_app()

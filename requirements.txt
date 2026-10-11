@@ -1,0 +1,10 @@
+fastapi==0.143.0
+uvicorn==0.54.0
+docker==7.1.0
+croniter==6.0.0
+cryptography==50.0.2
+PyYAML==6.0.2
+requests==2.34.2
+itsdangerous==2.2.0
+tzdata==2026.5
+

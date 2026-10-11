@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+.env
+data/
+.test-data/
+*.tar.gz
+*.log
+.coverage
+htmlcov/
+test-results/
+
