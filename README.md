@@ -134,6 +134,8 @@ Complete Google sign-in and consent yourself. Paste the complete resulting token
 
 If you authorize with a custom rclone client, set that same client ID and secret in the app before connecting the token. Do not mix tokens from rclone's built-in client with a different client ID.
 
+Drive API requests are paced to avoid bursts. Request rate limits are retried with increasing delays and jitter, within the operation's original timeout; an upload verification retry does not re-upload the archive. Activity distinguishes API request limits from daily API quotas and full account storage. Daily quotas, storage limits and authorization errors need corrective action rather than repeated upload retries. Persistent request limits can come from rclone's shared OAuth project even when your own Drive has plenty of free space.
+
 [rclone's shared Google client is being retired during 2026](https://rclone.org/drive/#making-your-own-client-id), so your own client is recommended. If the default connection fails, create a Google **Desktop app** OAuth client with Drive API enabled using that guide, then authorize with the matching credentials:
 
 ```sh

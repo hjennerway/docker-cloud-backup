@@ -10,3 +10,7 @@ data/
 .coverage
 htmlcov/
 test-results/
+/artifacts/homeassistant-dashboard/dash-proxmox2.before.yaml
+/artifacts/homeassistant-dashboard/dash-proxmox2.yaml
+/artifacts/homeassistant-dashboard/infrastructure-compute.jpg
+/artifacts/homeassistant-dashboard/infrastructure-nas.jpg

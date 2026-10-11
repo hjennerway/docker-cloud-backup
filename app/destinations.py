@@ -2,10 +2,12 @@
 import configparser
 import hashlib
 import json
+import random
 import re
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path, PurePosixPath
 from urllib.parse import urlparse
 
@@ -16,6 +18,10 @@ from .discovery import BackupError
 
 class DriveAccessTokenError(BackupError):
     """A rejected access token may be recoverable with its refresh token."""
+
+
+class DriveRateLimitError(BackupError):
+    """Retryable request throttling, distinct from storage and daily quotas."""
 
 
 def parse_smb(value):
@@ -75,8 +81,30 @@ class Destinations:
 
     def _run(self, args, config=None, timeout=120, input_text=None):
         cmd = ["rclone", *args]
+        drive = any(arg.startswith("gdrive:") for arg in args)
         if config:
-            cmd += ["--config", str(config), "--contimeout", "15s", "--timeout", "60s", "--retries", "2", "--low-level-retries", "2"]
+            cmd += ["--config", str(config), "--contimeout", "15s", "--timeout", "60s"]
+            if drive:
+                # Each operation creates a new rclone process, resetting its
+                # default 100-request burst. Pace even the first requests and
+                # let its low-level pacer recover individual API calls. Only
+                # rate limits warrant another whole-command attempt below.
+                cmd += ["--tpslimit", "2", "--tpslimit-burst", "1",
+                        "--drive-pacer-min-sleep", "500ms", "--drive-pacer-burst", "1",
+                        "--retries", "1", "--low-level-retries", "8"]
+            else:
+                cmd += ["--retries", "2", "--low-level-retries", "2"]
+        deadline = time.monotonic() + timeout
+        for attempt in range(4):
+            try:
+                return self._execute(cmd, max(0.001, deadline - time.monotonic()), input_text)
+            except DriveRateLimitError:
+                delay = min(60, 10 * 2**attempt) + random.uniform(0, 1)
+                if not drive or attempt == 3 or deadline - time.monotonic() <= delay:
+                    raise
+                time.sleep(delay)
+
+    def _execute(self, cmd, timeout, input_text):
         try:
             p = subprocess.run(cmd, input=input_text, capture_output=True, text=True, timeout=timeout, check=False)
         except FileNotFoundError:
@@ -99,8 +127,15 @@ class Destinations:
                 raise DriveAccessTokenError("Google rejected the Drive access token. Generate a new complete rclone token and reconnect with the same OAuth client.")
             if any(text in error for text in ("invalid_grant", "token has been expired or revoked", "failed to refresh token")):
                 raise BackupError("Google Drive authorization expired or was revoked. Reconnect Google Drive.")
-            if any(text in error for text in ("ratelimitexceeded", "dailylimitexceeded", "quotaexceeded")):
-                raise BackupError("Google Drive's request or storage limit was reached. Check Drive space and OAuth client quotas, then try again.")
+            if "storagequotaexceeded" in error:
+                raise BackupError("Google Drive's storage limit was reached (storageQuotaExceeded). Free up space in the connected Google account or increase its storage.")
+            if "dailylimitexceeded" in error or ("quota" in error and "queries per day" in error):
+                raise BackupError("Google Drive's daily API limit was reached (dailyLimitExceeded). Check the OAuth project's daily quota; reconnect with your own client if using rclone's shared client.")
+            if any(text in error for text in ("ratelimitexceeded", "rate limit exceeded", "googleapi: error 429", "too many requests")) or ("quota" in error and "queries per minute" in error):
+                reason = "userRateLimitExceeded" if "userratelimitexceeded" in error else "rateLimitExceeded"
+                raise DriveRateLimitError(f"Google Drive's API request limit was reached ({reason}). Check the OAuth project's quotas; reconnect with your own client if using rclone's shared client.")
+            if "quotaexceeded" in error:
+                raise BackupError("Google Drive's API quota was reached (quotaExceeded). Check the OAuth project's quotas; reconnect with your own client if using rclone's shared client.")
             if any(text in error for text in ("permission denied", "access is denied", "status_access_denied", "insufficientfilepermissions")):
                 raise BackupError("The destination denied access. Check the account's permission to the chosen folder.")
             if any(text in error for text in ("no such host", "connection refused", "network is unreachable", "i/o timeout")):

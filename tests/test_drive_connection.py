@@ -37,11 +37,12 @@ def result(output="[]", error=""):
     ("googleapi: Error 403: SERVICE_DISABLED", "Drive API is disabled"),
     ("googleapi: Error 403: insufficientPermissions", "lacks Drive permissions"),
     ("googleapi: Error 403: insufficient authentication scopes", "lacks Drive permissions"),
-    ("googleapi: Error 403: userRateLimitExceeded", "limit was reached"),
-    ("googleapi: Error 403: storageQuotaExceeded", "limit was reached"),
+    ("googleapi: Error 403: userRateLimitExceeded", "API request limit was reached (userRateLimitExceeded)"),
+    ("googleapi: Error 403: storageQuotaExceeded", "storage limit was reached (storageQuotaExceeded)"),
 ])
 def test_google_errors_are_specific_and_redacted(tmp_path, monkeypatch, error, expected):
     dest = Destinations(Store(tmp_path))
+    monkeypatch.setattr("app.destinations.time.sleep", lambda delay: None)
     monkeypatch.setattr("app.destinations.subprocess.run", lambda *a, **k: result(error=error + " fixture-secret"))
     with pytest.raises(BackupError) as exc:
         dest._run(["lsjson", "gdrive:"])
