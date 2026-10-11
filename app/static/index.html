@@ -3,8 +3,18 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#0d292e" />
+    <meta name="theme-color" content="#102d32" />
+    <meta name="apple-mobile-web-app-title" content="Cloud Backup" />
     <title>Cloud Backup · Docker config backups</title>
+    <link rel="icon" href="/favicon.ico" sizes="16x16 32x32 48x48" />
+    <link rel="icon" href="/static/icons/favicon-32x32.png" type="image/png" sizes="32x32" />
+    <link rel="icon" href="/static/icons/favicon-16x16.png" type="image/png" sizes="16x16" />
+    <link rel="icon" href="/static/icons/icon.svg" type="image/svg+xml" sizes="any" />
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png" sizes="180x180" />
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-167x167.png" sizes="167x167" />
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-152x152.png" sizes="152x152" />
+    <link rel="apple-touch-icon" href="/static/icons/apple-touch-icon-120x120.png" sizes="120x120" />
+    <link rel="manifest" href="/static/site.webmanifest" />
     <link rel="stylesheet" href="/static/style.css" />
     <script defer src="/static/app.js"></script>
   </head>
@@ -12,7 +22,9 @@
     <div id="toast" role="status" aria-live="polite"></div>
     <section id="login" class="login hidden">
       <div class="login-card">
-        <div class="brand-icon">↥</div>
+        <div class="brand-icon" aria-hidden="true">
+          <img src="/static/icons/icon.svg" width="44" height="44" alt="" />
+        </div>
         <p class="eyebrow">DOCKER CLOUD BACKUP</p>
         <h1>A little backup.<br />A lot of peace of mind.</h1>
         <p class="muted">
@@ -51,7 +63,7 @@
     <div id="shell" class="shell hidden">
       <aside class="sidebar">
         <a href="#stacks" class="brand"
-          ><span class="brand-icon">↥</span
+          ><span class="brand-icon" aria-hidden="true"><img src="/static/icons/icon.svg" width="44" height="44" alt="" /></span
           ><span>Cloud Backup<small>DOCKER CONFIG MANAGER</small></span></a
         >
         <p class="nav-label">WORKSPACE</p>
@@ -61,12 +73,14 @@
               >0</span
             ></a
           >
+          <a href="#restore" data-page="restore"><span>↶</span>Restore</a>
           <a href="#destinations" data-page="destinations"
             ><span>↗</span>Destinations</a
           >
           <a href="#mappings" data-page="mappings"
             ><span>≡</span>Image mappings</a
           >
+          <a href="#scheduled" data-page="scheduled"><span>▦</span>Scheduled</a>
           <a href="#activity" data-page="activity"><span>◷</span>Activity</a>
           <a href="#notifications" data-page="notifications"
             ><span>♧</span>Notifications</a
@@ -144,6 +158,37 @@
                 </p>
               </div>
             </div>
+          </section>
+          <section id="page-restore" class="page hidden">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">BRING YOUR CONFIG BACK</p>
+                <h1>Restore a backup</h1>
+                <p class="muted">Choose a local container and upload its backup to restore your files.</p>
+              </div>
+              <button id="refresh-restore" class="secondary">↻ Refresh containers</button>
+            </div>
+            <article class="panel restore-panel">
+              <form id="restore-form">
+                <label>Local container<select id="restore-container" required><option value="">Loading containers…</option></select></label>
+                <p id="restore-container-info" class="hint"></p>
+                <label>Backup file<input id="restore-file" type="file" accept=".zip,.tar.gz,.tgz,application/zip,application/gzip" required /></label>
+                <p class="hint">Use a Cloud Backup ZIP with its manifest and data, a ZIP containing one downloaded backup, or an existing .tar.gz backup.</p>
+                <button id="restore-upload" class="secondary" disabled>Upload &amp; review backup</button>
+              </form>
+              <div id="restore-source-choice" class="hidden">
+                <label>Container in this backup<select id="restore-source"></select></label>
+              </div>
+              <div id="restore-preview" class="hidden"></div>
+              <div id="restore-confirmation" class="hidden">
+                <p class="restore-warning">Running containers stop during restore and restart afterward. Backed-up files overwrite current files; files absent from the backup are kept. Compose files and images are kept as they are.</p>
+                <label class="check"><input id="restore-confirm" type="checkbox" />I understand that this overwrites the listed files in the selected container.</label>
+                <button id="restore-start" class="primary" disabled>Stop, restore &amp; restart</button>
+              </div>
+              <p id="restore-status" class="hint" role="status" aria-live="polite"></p>
+              <p id="restore-error" class="error" role="alert"></p>
+              <a id="restore-activity" class="hidden" href="#activity">View restore in Activity →</a>
+            </article>
           </section>
           <section id="page-destinations" class="page hidden">
             <div class="page-heading">
@@ -260,9 +305,18 @@
                   ><button id="save-drive-token" class="secondary">
                     Connect with token
                   </button>
+                  <p id="drive-connect-result" class="hint" role="status"></p>
                   <p class="hint">
                     Using a custom rclone client? Set the matching client ID and
                     secret below before saving the token.
+                  </p>
+                  <p class="hint">
+                    rclone's shared Google client is being retired during 2026.
+                    If the default connection fails, use
+                    <a href="https://rclone.org/drive/#making-your-own-client-id" target="_blank" rel="noreferrer">your own Google client</a>
+                    with Drive API enabled. Generate the token with
+                    <code>rclone authorize "drive" "CLIENT_ID" "CLIENT_SECRET"</code>,
+                    then enter those same credentials below.
                   </p>
                   <details>
                     <summary>Browser OAuth / custom client</summary>
@@ -357,6 +411,36 @@
                 placeholder="Find an image mapping…"
             /></label>
             <div id="rules-list"></div>
+          </section>
+          <section id="page-scheduled" class="page hidden">
+            <div class="page-heading">
+              <div>
+                <p class="eyebrow">WHAT'S COMING UP</p>
+                <h1>Scheduled</h1>
+                <p class="muted">Upcoming backup jobs, listed in the order they are due.</p>
+              </div>
+              <button id="refresh-scheduled" class="secondary">↻ Refresh jobs</button>
+            </div>
+            <div class="section-heading scheduled-heading">
+              <div>
+                <h2 id="scheduled-window">Next 7 days</h2>
+                <p id="scheduled-range" class="muted"></p>
+              </div>
+              <div class="schedule-window-toggle" role="group" aria-label="Scheduled jobs window">
+                <button type="button" data-action="scheduled-window" data-days="7" aria-pressed="true">7d</button>
+                <button type="button" data-action="scheduled-window" data-days="30" aria-pressed="false">30d</button>
+              </div>
+            </div>
+            <p class="hint">Each run uses its stack's timezone. Paused schedules are hidden. Overdue jobs wait for the backup worker; busy workers and recovery can delay start times.</p>
+            <p id="scheduled-error" class="error" role="alert"></p>
+            <div id="scheduled-list" aria-busy="false"></div>
+            <div id="scheduled-pagination" class="scheduled-pagination hidden">
+              <p id="scheduled-count" class="muted" role="status"></p>
+              <div class="scheduled-page-actions">
+                <button id="scheduled-previous" class="secondary" type="button" disabled>← Previous</button>
+                <button id="scheduled-next" class="secondary" type="button" disabled>Next →</button>
+              </div>
+            </div>
           </section>
           <section id="page-activity" class="page hidden">
             <div class="page-heading">

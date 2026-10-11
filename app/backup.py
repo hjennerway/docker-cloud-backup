@@ -20,6 +20,7 @@ from docker.errors import NotFound
 
 from .destinations import notify
 from .discovery import BackupError, start_order
+from .restore import RestoreManager
 
 log = logging.getLogger(__name__)
 
@@ -107,6 +108,7 @@ class BackupEngine:
         self.scheduler = None
         self.archive_dir = store.root / "archives"
         self.archive_dir.mkdir(exist_ok=True)
+        self.restore = RestoreManager(self)
 
     def start(self):
         self.recover()
@@ -147,6 +149,7 @@ class BackupEngine:
         if not self.lock.acquire(blocking=False):
             return
         try:
+            self.restore.cleanup()
             if self.recover():
                 return
         finally:
@@ -173,7 +176,7 @@ class BackupEngine:
         if self.cancelled.is_set() or not self.lock.acquire(blocking=False):
             if scheduled:
                 return None
-            raise BackupError("Another backup or recovery is in progress. Try again shortly.")
+            raise BackupError("Another backup, restore or recovery is in progress. Try again shortly.")
         jobs = []
         try:
             if self.store.rows("SELECT 1 FROM restart_journal"):

@@ -104,6 +104,8 @@ The default uncompressed archive limit is 10 GiB (`MAX_BACKUP_GB`). Config shoul
 
 Five-field cron: `minute hour day-of-month month day-of-week`. The UI offers hourly, daily, weekly and monthly presets, editable fields and the next five run times. Each stack has an IANA timezone such as `Europe/London`. Standard cron OR semantics apply when both day fields are restricted. Preview around daylight-saving changes if wall-clock timing matters.
 
+Open **Scheduled** to see every upcoming backup run in chronological order. Toggle **7d** or **30d** to view the next seven or thirty days, with each run displayed in its stack's timezone. Frequent schedules use Previous/Next pages of 100 jobs. Paused schedules are hidden; a missed schedule appears once as overdue, waiting for the worker. Edit a schedule from its row or use **Refresh jobs** to update the window.
+
 Schedules and their next due time survive restart. A missed schedule is run once after recovery, without replaying every missed interval. A busy worker defers other due stacks. Default retention is seven days; it runs after a successful backup and only deletes older successful backups for that stack. The newest successful archive, failed/partial jobs and unrelated remote files are retained. If destinations change, old remote files are retained for manual review. Retention only acts on remote file receipts recorded by this app; there is no broad remote sync/delete.
 
 ## SMB
@@ -122,9 +124,17 @@ Install [rclone](https://rclone.org/install/) on a computer with a browser, then
 rclone authorize "drive"
 ```
 
-Complete Google sign-in and consent yourself. Paste the complete resulting token JSON into **Destinations → Google Drive → Connect or reconnect**, then connect. Browse to the desired Drive folder, choose **Use this folder**, enable mirroring and save. Refresh tokens are encrypted in SQLite and updated after rclone refreshes them.
+Complete Google sign-in and consent yourself. Paste the complete resulting token JSON into **Destinations → Google Drive → Connect or reconnect**, then connect. The app verifies that it can list My Drive before saving the connection; a failed reconnect keeps your previous settings. Browse to the desired Drive folder, choose **Use this folder**, enable mirroring and save. Refresh tokens are encrypted in SQLite and updated after rclone refreshes them. If Google rejects an access token before its recorded expiry, the app forces one refresh and retries the operation.
 
 If you authorize with a custom rclone client, set that same client ID and secret in the app before connecting the token. Do not mix tokens from rclone's built-in client with a different client ID.
+
+[rclone's shared Google client is being retired during 2026](https://rclone.org/drive/#making-your-own-client-id), so your own client is recommended. If the default connection fails, create a Google **Desktop app** OAuth client with Drive API enabled using that guide, then authorize with the matching credentials:
+
+```sh
+rclone authorize "drive" "CLIENT_ID" "CLIENT_SECRET"
+```
+
+Enter that same client ID and secret in the app before connecting the new token. Grant full Drive access so existing destination folders can be listed. The connection check reports rejected tokens, client mismatches, missing permissions, disabled APIs and quota limits without exposing credentials. It checks read access; the first backup checks upload permission.
 
 ### Browser OAuth
 
@@ -144,7 +154,18 @@ Save settings before using **Send a test**. Failure alerts are sent when enabled
 
 ## Restore
 
-Restore is deliberately manual in this version. Test on a separate stack first.
+Open **Restore** to restore configuration or volume data into an existing container on the local Docker host:
+
+1. Select a local container. Running and stopped containers, including standalone containers, are listed. The backup app and excluded stacks are omitted.
+2. Upload a backup and click **Upload & review backup**. Accepted formats are an existing Cloud Backup `.tar.gz`/`.tgz`, a ZIP containing exactly one such backup, or a ZIP containing `manifest.json` and the original `containers/...` directory layout at its root. An arbitrary ZIP of config files has no destination mappings and is rejected.
+3. Select the original container inside the backup if it contains several. The image repository must match the target; tags may differ. Review the destination paths, confirm that the listed files can be overwritten, and start the restore.
+4. Follow progress and the result in **Activity**. The app stops a running target, writes the backed-up files through Docker, and restarts it, including when a write fails. A target that was already stopped stays stopped. Failed restarts use the same durable restart journal and automatic recovery as backups.
+
+Restoration overwrites files present in the backup and keeps other files, including excluded cache/log files. It does not recreate containers, change images or overwrite host Compose files. Restore destinations must already exist (a directory backup needs its directory; a file backup needs its parent). Read-only destinations and storage shared with another running container fail preflight; stop the other consumer first. Use a separate test container when checking a backup for the first time.
+
+Uploads and unpacked data are limited by `MAX_BACKUP_GB`. Uploaded files are stored privately in the data volume, bound to the signed-in session, and expire after one hour. The scheduler cleans up expired uploads. The upload is removed after a restore attempt; restart recovery retains its journal separately. Only one backup, restore or recovery operation can run at a time. Archives are checked for path traversal, duplicate entries, unsafe links and unsupported file types before writing container data. ZIPs containing a `.tar.gz` preserve its file modes and ownership IDs; direct ZIPs use their file modes and the destination directory's ownership IDs. A failed write can leave some files restored; review Activity before retrying.
+
+For a complete stack recovery onto a new host, restore the Compose inputs manually first:
 
 1. Download an archive and compare its SHA-256 against Activity (`sha256sum archive.tar.gz`).
 2. Inspect `manifest.json` and the archive listing before extracting a trusted archive into a new, empty directory. Do not blindly extract unknown archives as root.

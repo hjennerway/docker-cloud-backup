@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 128 128" role="img" aria-labelledby="title desc">
+  <title id="title">Cloud Backup</title>
+  <desc id="desc">A mint whale with a tail that curls into a golden electrical plug.</desc>
+  <rect id="background" width="128" height="128" rx="28" fill="#102d32" />
+  <g id="mark">
+    <!-- The whale's tail continues as the plug's cable. -->
+    <path d="M77 70C95 80 104 67 104 49V43" fill="none" stroke="#a3e6d1" stroke-width="11" stroke-linecap="round" />
+    <path d="M20 65C20 51 30 43 44 43C59 43 69 51 74 62C77 69 84 70 93 64C91 80 73 92 48 92C31 92 20 82 20 65Z" fill="#a3e6d1" />
+    <path d="M52 72C55 80 64 83 70 80C66 91 55 96 47 91C43 88 47 78 52 72Z" fill="#56bea5" />
+    <circle cx="34" cy="62" r="3.5" fill="#102d32" />
+    <path d="M26 74C30 78 35 79 40 76" fill="none" stroke="#102d32" stroke-width="3" stroke-linecap="round" />
+    <path d="M96 28V20M110 28V20" fill="none" stroke="#f5d68e" stroke-width="6" stroke-linecap="round" />
+    <path d="M91 29H115V36C115 44 110 49 103 49C96 49 91 44 91 36Z" fill="#f5d68e" />
+  </g>
+</svg>

@@ -3,10 +3,11 @@ import hmac
 import json
 import os
 import secrets
+import shutil
 import threading
 import time
 from contextlib import asynccontextmanager
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlencode, urlparse
@@ -18,11 +19,14 @@ from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field, StrictBool
+from starlette.concurrency import run_in_threadpool
 
 from .backup import BackupEngine, next_run, utcnow
 from .destinations import Destinations, notify, validate_settings
 from .discovery import BackupError, Discovery, validate_rule
 from .store import DEFAULTS, SECRETS, Store
+from .restore import restore_limit
+from .scheduled import scheduled_jobs
 
 
 class Login(BaseModel):
@@ -49,6 +53,17 @@ class BackupSelection(BaseModel):
 
 class ManualBackupPreference(BaseModel):
     include_in_manual_backup: StrictBool
+
+
+class RestorePreview(BaseModel):
+    token: str = Field(min_length=1, max_length=100)
+    container_id: str = Field(min_length=1, max_length=100)
+    source_index: int = Field(ge=0, le=999)
+
+
+class RestoreSelection(BaseModel):
+    token: str = Field(min_length=1, max_length=100)
+    confirmed: StrictBool = False
 
 
 def create_app(store=None, client=None, start_worker=True):
@@ -128,7 +143,12 @@ def create_app(store=None, client=None, start_worker=True):
             origin = request.headers.get("origin")
             if request.headers.get("x-requested-with") != "cloud-backup" or (origin and urlparse(origin).netloc != request.headers.get("host")):
                 return JSONResponse({"detail": "Request origin rejected."}, status_code=403)
-            if int(request.headers.get("content-length", 0)) > 100000:
+            try:
+                content_length = int(request.headers.get("content-length", 0))
+            except ValueError:
+                return JSONResponse({"detail": "Invalid request size."}, status_code=400)
+            limit = restore_limit() if request.url.path == "/api/restore/upload" else 100000
+            if content_length < 0 or content_length > limit:
                 return JSONResponse({"detail": "Request is too large."}, status_code=413)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
@@ -186,6 +206,72 @@ def create_app(store=None, client=None, start_worker=True):
                 "settings": store.settings(redacted=True), "rules": store.rules(),
                 "busy": bool(app.state.engine and app.state.engine.lock.locked()),
                 "timezone": os.getenv("TZ", "UTC")}
+
+    @app.get("/api/scheduled")
+    def scheduled(days: int = 7, start: datetime | None = None,
+                  after: datetime | None = None, after_stack: str = ""):
+        if days not in {7, 30}:
+            raise HTTPException(422, "Choose a 7-day or 30-day window.")
+        if any(value is not None and value.tzinfo is None for value in (start, after)):
+            raise HTTPException(422, "Scheduled job dates must include a timezone.")
+        start = start.astimezone(timezone.utc) if start else utcnow()
+        after = after.astimezone(timezone.utc) if after else None
+        return scheduled_jobs(store.rows("SELECT * FROM schedules WHERE enabled=1"),
+                              start, days, after, after_stack)
+
+    @app.get("/api/restore/containers")
+    def restore_containers():
+        return {"containers": engine().restore.containers(), "max_upload_bytes": restore_limit()}
+
+    @app.post("/api/restore/upload")
+    async def upload_restore(request: Request, filename: str = "backup.zip"):
+        if not filename.lower().endswith((".zip", ".tar.gz", ".tgz")) or len(filename) > 255:
+            raise BackupError("Choose a ZIP or .tar.gz backup file.")
+        worker = await run_in_threadpool(engine)
+        manager = worker.restore
+        await run_in_threadpool(manager.acquire)
+        token = secrets.token_urlsafe(32)
+        folder = manager.root / token
+        keep_upload = False
+        try:
+            await run_in_threadpool(manager.cleanup)
+            folder.mkdir(mode=0o700)
+            path = folder / "upload"
+            # Stream directly to the data volume: /tmp may be a small tmpfs.
+            received = 0
+            with path.open("wb") as output:
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > restore_limit():
+                        raise HTTPException(413, "The uploaded backup exceeds MAX_BACKUP_GB.")
+                    if shutil.disk_usage(folder).free < len(chunk) + 256 * 1024 * 1024:
+                        raise BackupError("Not enough free space to upload this backup.")
+                    await run_in_threadpool(output.write, chunk)
+            path.chmod(0o600)
+            result = await run_in_threadpool(manager.inspect, token, folder, filename, session(request)["id"])
+            keep_upload = True
+            return result
+        finally:
+            try:
+                if not keep_upload and folder.exists():
+                    await run_in_threadpool(shutil.rmtree, folder)
+            finally:
+                worker.lock.release()
+
+    @app.post("/api/restore/preview")
+    def preview_restore(body: RestorePreview, request: Request):
+        manager = engine().restore
+        manager.acquire()
+        try:
+            return manager.preview(body.token, session(request)["id"], body.container_id, body.source_index)
+        finally:
+            manager.engine.lock.release()
+
+    @app.post("/api/restore")
+    def restore_container(body: RestoreSelection, request: Request):
+        if not body.confirmed:
+            raise BackupError("Confirm that the backed-up files may overwrite this container's data.")
+        return {"job_id": engine().restore.submit(body.token, session(request)["id"])}
 
     @app.put("/api/stacks/{name:path}/schedule")
     def save_schedule(name: str, body: Schedule):
@@ -301,6 +387,10 @@ def create_app(store=None, client=None, start_worker=True):
             current[key] = value
         validate_settings(current)
         with app.state.destinations.lock:
+            if body.get("drive_token"):
+                # Check a candidate before replacing the saved connection.
+                # The probe may refresh its token; save the refreshed value.
+                app.state.destinations.folders(settings=current)
             store.save_settings({key: current[key] for key in body if key not in SECRETS or body[key]})
         return store.settings(redacted=True)
 
@@ -369,12 +459,19 @@ def create_app(store=None, client=None, start_worker=True):
                 raise ValueError()
             token["expiry"] = (utcnow() + timedelta(seconds=token.get("expires_in", 3600))).isoformat()
             with app.state.destinations.lock:
-                store.save_settings({"drive_token": json.dumps(token), "drive_enabled": False, "drive_folder_id": "", "drive_folder_name": ""})
+                candidate = {**s, "drive_token": json.dumps(token), "drive_enabled": False,
+                             "drive_folder_id": "", "drive_folder_name": ""}
+                app.state.destinations.folders(settings=candidate)
+                store.save_settings({key: candidate[key] for key in ("drive_token", "drive_enabled", "drive_folder_id", "drive_folder_name")})
         except (requests.RequestException, ValueError):
             raise HTTPException(400, "Google token exchange failed. Check the OAuth client and redirect URL.") from None
         return RedirectResponse("/#destinations", status_code=303)
 
     app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+    @app.get("/favicon.ico", include_in_schema=False)
+    def favicon():
+        return FileResponse(Path(__file__).parent / "static" / "icons" / "favicon.ico", media_type="image/vnd.microsoft.icon")
 
     @app.get("/")
     def index():

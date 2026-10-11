@@ -2,8 +2,10 @@
 import io
 import json
 import os
+import shutil
 import tarfile
 import uuid
+import zipfile
 
 import docker
 import pytest
@@ -94,6 +96,38 @@ def test_real_named_volume_backup_restart_and_restore(tmp_path, mode):
             chunks, _ = restored.get_archive("/tmp/settings.json")
             with tarfile.open(fileobj=io.BytesIO(b"".join(chunks))) as check:
                 assert check.extractfile("settings.json").read() == b'{"fixture":"restorable"}'
+        # Exercise the app restore worker with a running, disposable target.
+        restore_volume = client.volumes.create(name=project + "-restore-data")
+        volumes.append(restore_volume)
+        target = client.containers.create("docker-cloud-backup:local", ["python", "-c",
+            "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); time.sleep(3600)"], entrypoint=[],
+            name=project + "-restore-running", volumes={restore_volume.name: {"bind": "/config", "mode": "rw"}})
+        created.append(target)
+        target.start()
+        token = uuid.uuid4().hex
+        upload_folder = engine.restore.root / token
+        upload_folder.mkdir()
+        backup_path = engine.archive_dir / job["archive"]
+        if mode == "volumes":
+            with zipfile.ZipFile(upload_folder / "upload", "w", zipfile.ZIP_DEFLATED) as wrapper:
+                wrapper.write(backup_path, "backup.tar.gz")
+        else:
+            shutil.copyfile(backup_path, upload_folder / "upload")
+        info = engine.restore.inspect(token, upload_folder, "backup.zip" if mode == "volumes" else "backup.tar.gz", "test-session")
+        source_index = next(c["index"] for c in info["containers"] if c["name"].endswith("-active"))
+        preview = engine.restore.preview(token, "test-session", target.id, source_index)
+        assert preview["paths"][0]["source"] == ("/config/settings.json" if mode == "manual" else "/config")
+        restore_id = engine.restore.submit(token, "test-session")
+        engine.pool.submit(lambda: None).result(timeout=30)
+        restored_job = store.rows("SELECT * FROM jobs WHERE id=?", (restore_id,))[0]
+        assert restored_job["status"] == "success", restored_job["detail"]
+        target.reload()
+        assert target.status == "running"
+        chunks, _ = target.get_archive("/config/settings.json")
+        with tarfile.open(fileobj=io.BytesIO(b"".join(chunks))) as check:
+            assert check.extractfile("settings.json").read() == b'{"fixture":"restorable"}'
+            assert check.getmember("settings.json").mode == 0o640
+        assert not store.rows("SELECT * FROM restart_journal")
     finally:
         if engine:
             engine.close()

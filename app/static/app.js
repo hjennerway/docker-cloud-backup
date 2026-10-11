@@ -12,11 +12,27 @@ let state = null,
   page = "stacks",
   refreshPromise = null,
   manualBackupBusy = false,
+  restoreBusy = false,
+  restoreContainers = [],
+  restoreUpload = null,
+  restorePreview = null,
+  restoreJobId = null,
+  restoreMaxBytes = 0,
   toastTimer,
   folderTrail = [];
 const manualSelectionsSaving = new Map();
+let scheduledDays = 7,
+  scheduledData = null,
+  scheduledStart = null,
+  scheduledPage = 0,
+  scheduledCursors = [null],
+  scheduledLoading = false,
+  scheduledRequest = 0,
+  scheduledHtml = "";
 const pages = {
   stacks: "Stacks",
+  scheduled: "Scheduled",
+  restore: "Restore",
   destinations: "Destinations",
   mappings: "Image mappings",
   activity: "Activity",
@@ -93,6 +109,14 @@ function showLogin() {
   $("shell").classList.add("hidden");
   $("login").classList.remove("hidden");
   state = null;
+  restoreContainers = [];
+  restoreUpload = restorePreview = null;
+  restoreJobId = null;
+  resetRestorePreview();
+  $("restore-source-choice").classList.add("hidden");
+  $("restore-activity").classList.add("hidden");
+  $("restore-status").textContent = "";
+  $("restore-file").value = "";
 }
 function showApp() {
   $("login").classList.add("hidden");
@@ -112,6 +136,8 @@ function route() {
   if (state) {
     render();
     if (page === "destinations" || page === "notifications") fillSettings();
+    if (page === "restore") loadRestoreContainers().catch((e) => restoreError(e));
+    if (page === "scheduled") loadScheduled(true);
   }
 }
 function getStack(name) {
@@ -121,9 +147,11 @@ async function refresh(fresh = false) {
   if (fresh && refreshPromise) await refreshPromise;
   if (refreshPromise) return refreshPromise;
   refreshPromise = api("/dashboard")
-    .then((dashboard) => {
+    .then(async (dashboard) => {
       state = dashboard;
       render();
+      if (page === "restore" && !restoreBusy) await loadRestoreContainers();
+      if (page === "scheduled" && !scheduledLoading) await loadScheduled();
     })
     .finally(() => { refreshPromise = null; });
   return refreshPromise;
@@ -137,11 +165,11 @@ function render() {
     : "Connected · auto-discovery";
   let alerts = [];
   if (state.docker_error) alerts.push(state.docker_error);
-  if (state.recovery.length)
+  if (state.recovery.length && !state.busy)
     alerts.push(
       "Restart recovery needs attention: " +
         state.recovery.map((r) => r.name).join(", ") +
-        ". The app retries every ten seconds; new backups are paused.",
+        ". The app retries every ten seconds; backups and restores are paused.",
     );
   $("global-alert").innerHTML = alerts
     .map((a) => `<div class="alert">${esc(a)}</div>`)
@@ -149,7 +177,236 @@ function render() {
   renderStacks();
   renderJobs();
   renderRules();
+  renderRestore();
+  renderScheduled();
 }
+
+async function loadScheduled(reset = false) {
+  if (reset) {
+    scheduledPage = 0;
+    scheduledCursors = [null];
+    scheduledStart = null;
+    scheduledData = null;
+  }
+  const request = ++scheduledRequest;
+  const params = new URLSearchParams({ days: scheduledDays });
+  if (scheduledStart && scheduledPage > 0) params.set("start", scheduledStart);
+  const cursor = scheduledCursors[scheduledPage];
+  if (cursor) {
+    params.set("after", cursor.after);
+    params.set("after_stack", cursor.after_stack);
+  }
+  scheduledLoading = true;
+  $("scheduled-error").textContent = "";
+  renderScheduled();
+  try {
+    const result = await api("/scheduled?" + params);
+    if (request !== scheduledRequest || !state) return;
+    scheduledData = result;
+    scheduledStart = result.start;
+    scheduledCursors[scheduledPage + 1] = result.next;
+  } catch (e) {
+    if (request === scheduledRequest && state) {
+      $("scheduled-error").textContent = e.message;
+      scheduledData = null;
+    }
+  } finally {
+    if (request === scheduledRequest) {
+      scheduledLoading = false;
+      if (state) renderScheduled();
+    }
+  }
+}
+function setScheduledList(html) {
+  if (scheduledHtml === html) return;
+  const previous = $("scheduled-list").querySelector(".scheduled-table-wrap");
+  const top = previous?.scrollTop || 0, left = previous?.scrollLeft || 0;
+  $("scheduled-list").innerHTML = html;
+  scheduledHtml = html;
+  const current = $("scheduled-list").querySelector(".scheduled-table-wrap");
+  if (current) {
+    current.scrollTop = top;
+    current.scrollLeft = left;
+  }
+}
+function renderScheduled() {
+  $("scheduled-window").textContent = `Next ${scheduledDays} days`;
+  document.querySelectorAll('[data-action="scheduled-window"]').forEach((button) => {
+    button.setAttribute("aria-pressed", String(Number(button.dataset.days) === scheduledDays));
+  });
+  $("scheduled-list").setAttribute("aria-busy", String(scheduledLoading));
+  $("refresh-scheduled").disabled = scheduledLoading;
+  $("scheduled-previous").disabled = scheduledLoading || scheduledPage === 0;
+  $("scheduled-next").disabled = scheduledLoading || !scheduledData?.next;
+  $("scheduled-pagination").classList.toggle("hidden", !scheduledData?.jobs.length && scheduledPage === 0);
+  $("scheduled-range").textContent = scheduledData
+    ? `${date(scheduledData.start, state.timezone)} – ${date(scheduledData.end, state.timezone)}`
+    : "";
+  if (!scheduledData) {
+    setScheduledList(`<div class="empty"><p>${scheduledLoading ? "Loading scheduled jobs…" : "Use Refresh jobs to load the schedule."}</p></div>`);
+    return;
+  }
+  const jobs = scheduledData.jobs;
+  $("scheduled-count").textContent = jobs.length
+    ? `Showing jobs ${scheduledPage * 100 + 1}–${scheduledPage * 100 + jobs.length}${scheduledData.next ? " · More jobs on the next page" : ""}`
+    : "No more jobs in this window.";
+  if (!jobs.length) {
+    setScheduledList(`<div class="empty"><h3>No jobs scheduled in the next ${scheduledDays} days</h3><p>Enable a stack's schedule on the <a href="#stacks">Stacks page</a>${scheduledDays === 7 ? ", or choose the 30d window" : ""}.</p></div>`);
+    return;
+  }
+  setScheduledList(`<div class="scheduled-table-wrap"><table class="scheduled-table"><caption class="sr-only">Backup jobs scheduled in the next ${scheduledDays} days</caption><thead><tr><th scope="col">#</th><th scope="col">Stack</th><th scope="col">Scheduled for</th><th scope="col">Schedule</th><th scope="col"><span class="sr-only">Actions</span></th></tr></thead><tbody>${jobs.map((job, index) => {
+    const stack = getStack(job.stack);
+    return `<tr><td class="scheduled-number">${scheduledPage * 100 + index + 1}</td><th scope="row">${esc(job.stack)}</th><td><time datetime="${esc(job.run_at)}">${esc(date(job.run_at, job.timezone))}</time><small>${esc(job.timezone)}</small>${job.overdue ? '<span class="badge warn">Overdue · waiting for worker</span>' : ""}</td><td><code>${esc(job.cron)}</code></td><td>${stack && !stack.excluded ? `<button class="text-button" data-action="schedule" data-name="${esc(job.stack)}" aria-label="Edit schedule for ${esc(job.stack)}">Edit schedule</button>` : '<span class="muted">Stack unavailable</span>'}</td></tr>`;
+  }).join("")}</tbody></table></div>`);
+}
+
+function restoreError(error) {
+  $("restore-error").textContent = error.message;
+  $("restore-status").textContent = "";
+}
+function resetRestorePreview() {
+  restorePreview = null;
+  $("restore-confirm").checked = false;
+  $("restore-preview").classList.add("hidden");
+  $("restore-confirmation").classList.add("hidden");
+  $("restore-error").textContent = "";
+  $("restore-status").className = "hint";
+}
+async function loadRestoreContainers() {
+  const result = await api("/restore/containers");
+  const selected = $("restore-container").value;
+  restoreContainers = result.containers;
+  restoreMaxBytes = result.max_upload_bytes;
+  $("restore-container").innerHTML = '<option value="">Select a container…</option>' +
+    restoreContainers.map((c) => `<option value="${esc(c.id)}">${esc(c.name)} · ${esc(c.state)}</option>`).join("");
+  $("restore-container").value = selected;
+  if (selected && !$("restore-container").value) resetRestorePreview();
+  renderRestore();
+}
+function renderRestore() {
+  const container = restoreContainers.find((c) => c.id === $("restore-container").value);
+  const blocked = restoreBusy || !state || state.busy || state.recovery.length > 0;
+  $("restore-container").disabled = restoreBusy;
+  $("restore-file").disabled = restoreBusy;
+  $("restore-source").disabled = restoreBusy;
+  $("refresh-restore").disabled = restoreBusy;
+  $("restore-upload").disabled = blocked || !container || !$("restore-file").files.length;
+  $("restore-start").disabled = blocked || !restorePreview || !$("restore-confirm").checked;
+  $("restore-container-info").textContent = container ? container.image :
+    restoreMaxBytes && !restoreContainers.length ? "No available containers. Create or start a local container first. Excluded stacks are omitted." : "";
+  if (restoreJobId && state) {
+    const job = state.jobs.find((j) => j.id === restoreJobId);
+    if (job) {
+      $("restore-status").textContent = job.detail;
+      $("restore-status").className = "hint" + (job.status === "failed" ? " error" : "");
+    }
+  }
+}
+function uploadRestoreFile(file) {
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    request.open("POST", "/api/restore/upload?filename=" + encodeURIComponent(file.name));
+    request.setRequestHeader("X-Requested-With", "cloud-backup");
+    request.setRequestHeader("Content-Type", "application/octet-stream");
+    request.upload.onprogress = (event) => {
+      $("restore-status").textContent = event.lengthComputable && event.loaded < event.total
+        ? `Uploading backup… ${Math.round(event.loaded / event.total * 100)}%`
+        : "Upload complete. Checking backup…";
+    };
+    request.onload = () => {
+      let result;
+      try { result = JSON.parse(request.responseText); }
+      catch { reject(new Error("The app did not respond. Check its container status.")); return; }
+      if (request.status === 401) showLogin();
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error(typeof result.detail === "string" ? result.detail : "Could not upload this backup."));
+      } else resolve(result);
+    };
+    request.onerror = () => reject(new Error("Backup upload failed. Check the connection and try again."));
+    request.onabort = () => reject(new Error("Backup upload was cancelled."));
+    request.send(file);
+  });
+}
+async function previewRestore() {
+  resetRestorePreview();
+  if (!restoreUpload || !$("restore-container").value || $("restore-source").value === "") return;
+  restoreBusy = true;
+  renderRestore();
+  $("restore-status").textContent = "Preparing files and checking restore destinations…";
+  try {
+    restorePreview = await api("/restore/preview", "POST", {
+      token: restoreUpload.token,
+      container_id: $("restore-container").value,
+      source_index: Number($("restore-source").value),
+    });
+    $("restore-preview").innerHTML = `<h2>Review restore</h2><p>From <strong>${esc(restorePreview.backup_container)}</strong> to <strong>${esc(restorePreview.container)}</strong></p><ul class="backup-items">${restorePreview.paths.map((p) => `<li><code>${esc(p.source)}</code><small>${p.files} entries · ${size(p.size)}</small></li>`).join("")}</ul>`;
+    $("restore-preview").classList.remove("hidden");
+    $("restore-confirmation").classList.remove("hidden");
+    $("restore-start").textContent = restorePreview.state === "running" ? "Stop, restore & restart" : "Restore files · keep container stopped";
+    $("restore-status").textContent = "Backup checked. Review the paths and confirm to restore.";
+  } catch (e) { restoreError(e); }
+  finally { restoreBusy = false; renderRestore(); }
+}
+$("restore-form").onsubmit = async (event) => {
+  event.preventDefault();
+  const file = $("restore-file").files[0];
+  if (!file || !$("restore-container").value) return;
+  resetRestorePreview();
+  restoreUpload = null;
+  restoreJobId = null;
+  $("restore-activity").classList.add("hidden");
+  $("restore-source-choice").classList.add("hidden");
+  if (file.size > restoreMaxBytes) { restoreError(new Error(`Backup upload exceeds the ${size(restoreMaxBytes)} limit.`)); return; }
+  restoreBusy = true;
+  renderRestore();
+  $("restore-status").textContent = "Uploading backup…";
+  try {
+    restoreUpload = await uploadRestoreFile(file);
+    const target = restoreContainers.find((c) => c.id === $("restore-container").value);
+    $("restore-source").innerHTML = '<option value="">Select a container from the backup…</option>' +
+      restoreUpload.containers.map((c) => `<option value="${c.index}">${esc(c.name)} · ${esc(c.image)}</option>`).join("");
+    const byName = restoreUpload.containers.find((c) => c.name === target.name);
+    const byService = restoreUpload.containers.filter((c) => c.service === target.service);
+    const selected = byName || (byService.length === 1 ? byService[0] : null) ||
+      (restoreUpload.containers.length === 1 ? restoreUpload.containers[0] : null);
+    $("restore-source").value = selected ? String(selected.index) : "";
+    $("restore-source-choice").classList.remove("hidden");
+    $("restore-status").textContent = "Backup uploaded. Select the container in the backup to review its files.";
+  } catch (e) { restoreError(e); }
+  finally { restoreBusy = false; renderRestore(); }
+  if (restoreUpload && $("restore-source").value !== "") await previewRestore();
+};
+$("restore-container").onchange = () => { restoreJobId = null; previewRestore(); renderRestore(); };
+$("restore-source").onchange = previewRestore;
+$("restore-file").onchange = () => {
+  restoreUpload = null;
+  restoreJobId = null;
+  resetRestorePreview();
+  $("restore-status").textContent = "";
+  $("restore-source-choice").classList.add("hidden");
+  $("restore-activity").classList.add("hidden");
+  renderRestore();
+};
+$("restore-confirm").onchange = renderRestore;
+$("refresh-restore").onclick = () => loadRestoreContainers().catch(restoreError);
+$("restore-start").onclick = async () => {
+  if (!restorePreview || !$("restore-confirm").checked) return;
+  restoreBusy = true;
+  renderRestore();
+  try {
+    const result = await api("/restore", "POST", { token: restoreUpload.token, confirmed: true });
+    restoreJobId = result.job_id;
+    restoreUpload = null;
+    resetRestorePreview();
+    $("restore-source-choice").classList.add("hidden");
+    $("restore-file").value = "";
+    $("restore-activity").classList.remove("hidden");
+    $("restore-status").textContent = "Restore queued. Activity will show progress and the result.";
+    toast("Restore started. Follow its progress in Activity.");
+    await refresh(true);
+  } catch (e) { restoreError(e); }
+  finally { restoreBusy = false; renderRestore(); }
+};
 function renderStacks() {
   const included = (stack) => !stack.excluded &&
     (manualSelectionsSaving.get(stack.name) ?? stack.include_in_manual_backup);
@@ -501,6 +758,12 @@ document.addEventListener("click", async (e) => {
   if (!b || b.disabled) return;
   try {
     switch (b.dataset.action) {
+      case "scheduled-window":
+        if (scheduledDays !== Number(b.dataset.days)) {
+          scheduledDays = Number(b.dataset.days);
+          await loadScheduled(true);
+        }
+        break;
       case "close":
         closeModal();
         break;
@@ -584,6 +847,19 @@ $("refresh").onclick = () =>
   refresh()
     .then(() => toast("Stack discovery refreshed."))
     .catch((e) => toast(e.message, true));
+$("refresh-scheduled").onclick = () => loadScheduled(true);
+$("scheduled-previous").onclick = () => {
+  if (scheduledLoading || scheduledPage === 0) return;
+  scheduledPage--;
+  scheduledData = null;
+  return loadScheduled();
+};
+$("scheduled-next").onclick = () => {
+  if (scheduledLoading || !scheduledData?.next) return;
+  scheduledPage++;
+  scheduledData = null;
+  return loadScheduled();
+};
 $("backup-selected").onclick = async () => {
   if ($("backup-selected").disabled) return;
   manualBackupBusy = true;
@@ -634,6 +910,10 @@ $("drive-form").onsubmit = async (e) => {
   }
 };
 $("save-drive-token").onclick = async () => {
+  const button = $("save-drive-token"), feedback = $("drive-connect-result");
+  button.disabled = true;
+  feedback.className = "hint";
+  feedback.textContent = "Checking Google Drive access…";
   try {
     const data = values([
       "drive_token",
@@ -648,9 +928,14 @@ $("save-drive-token").onclick = async () => {
       drive_folder_name: "",
     });
     fillSettings();
+    feedback.textContent = "Google Drive access checked. Choose a backup folder.";
     toast("Google Drive connected. Choose a folder to mirror backups.");
   } catch (e) {
+    feedback.className = "hint error";
+    feedback.textContent = e.message;
     toast(e.message, true);
+  } finally {
+    button.disabled = false;
   }
 };
 $("google-connect").onclick = async () => {
@@ -667,6 +952,7 @@ $("google-connect").onclick = async () => {
 $("disconnect-drive").onclick = async () => {
   try {
     await api("/drive/disconnect", "POST");
+    $("drive-connect-result").textContent = "";
     await refresh();
     fillSettings();
     toast("Google Drive disconnected. Existing backups were kept.");

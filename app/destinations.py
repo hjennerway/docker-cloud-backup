@@ -14,6 +14,10 @@ import requests
 from .discovery import BackupError
 
 
+class DriveAccessTokenError(BackupError):
+    """A rejected access token may be recoverable with its refresh token."""
+
+
 def parse_smb(value):
     value = value.replace("\\", "/")
     if value.startswith("smb://"):
@@ -41,7 +45,8 @@ def validate_settings(settings):
     if settings["drive_token"]:
         try:
             token = json.loads(settings["drive_token"])
-            if not isinstance(token, dict) or not token.get("refresh_token"):
+            if (not isinstance(token, dict) or not isinstance(token.get("refresh_token"), str)
+                    or not token["refresh_token"].strip()):
                 raise ValueError()
         except (ValueError, TypeError):
             raise BackupError("Google Drive needs the complete token JSON, including a refresh_token.") from None
@@ -84,8 +89,18 @@ class Destinations:
             error = p.stderr.lower()
             if any(text in error for text in ("logon is invalid", "logon failure", "status_logon_failure", "bad username or authentication")):
                 raise BackupError("SMB login was rejected. Check the username, password and domain.")
+            if any(text in error for text in ("invalid_client", "unauthorized_client", "oauth client was not found", "deleted_client")):
+                raise BackupError("Google rejected the OAuth client. Use the same client ID and secret that generated the token, then reconnect Google Drive.")
+            if any(text in error for text in ("accessnotconfigured", "service_disabled", "drive api has not been used", "drive api is disabled")):
+                raise BackupError("Google Drive API is disabled for the OAuth client. Enable it in that client's Google Cloud project, or generate a token with another client.")
+            if any(text in error for text in ("insufficientpermissions", "insufficient authentication scopes", "access_token_scope_insufficient")):
+                raise BackupError("The Google token lacks Drive permissions. Generate a new token with full Drive access and reconnect; changing the saved scope cannot add permissions.")
+            if any(text in error for text in ("googleapi: error 401", "autherror", "invalid authentication credentials")):
+                raise DriveAccessTokenError("Google rejected the Drive access token. Generate a new complete rclone token and reconnect with the same OAuth client.")
             if any(text in error for text in ("invalid_grant", "token has been expired or revoked", "failed to refresh token")):
                 raise BackupError("Google Drive authorization expired or was revoked. Reconnect Google Drive.")
+            if any(text in error for text in ("ratelimitexceeded", "dailylimitexceeded", "quotaexceeded")):
+                raise BackupError("Google Drive's request or storage limit was reached. Check Drive space and OAuth client quotas, then try again.")
             if any(text in error for text in ("permission denied", "access is denied", "status_access_denied", "insufficientfilepermissions")):
                 raise BackupError("The destination denied access. Check the account's permission to the chosen folder.")
             if any(text in error for text in ("no such host", "connection refused", "network is unreachable", "i/o timeout")):
@@ -93,36 +108,53 @@ class Destinations:
             raise BackupError("Destination operation failed. Check credentials, folder access, network and available space.")
         return p.stdout
 
-    def run(self, settings, args, timeout=120, root_id=None):
+    def run(self, settings, args, timeout=120, root_id=None, persist_token=True):
         with self.lock, tempfile.TemporaryDirectory(prefix="cloud-backup-") as temp:
             config = configparser.RawConfigParser()
-            if settings.get("smb_path"):
+            if any(arg.startswith("nas:") for arg in args) and settings.get("smb_path"):
                 host, _ = parse_smb(settings["smb_path"])
                 password = self._run(["obscure", "-"], input_text=settings["smb_password"] + "\n").strip() if settings["smb_password"] else ""
                 config["nas"] = {"type": "smb", "host": host, "user": settings["smb_user"],
                                  "pass": password, "domain": settings["smb_domain"]}
-            if settings["drive_token"]:
+            if any(arg.startswith("gdrive:") for arg in args) and settings["drive_token"]:
                 config["gdrive"] = {"type": "drive", "token": settings["drive_token"], "scope": "drive",
                                     "root_folder_id": root_id if root_id is not None else settings["drive_folder_id"]}
                 if settings["drive_client_id"]:
                     config["gdrive"]["client_id"] = settings["drive_client_id"]
                     config["gdrive"]["client_secret"] = settings["drive_client_secret"]
             path = Path(temp) / "rclone.conf"
-            with path.open("w") as f:
+            with path.open("w", encoding="utf-8") as f:
                 config.write(f)
             path.chmod(0o600)
+            forced_token = None
             try:
-                return self._run(args, path, timeout)
+                try:
+                    return self._run(args, path, timeout)
+                except DriveAccessTokenError:
+                    if not config.has_section("gdrive"):
+                        raise
+                    # A pasted token can have a future expiry while Google has
+                    # already rejected its access token. Force rclone to refresh
+                    # once, using the same client and refresh token.
+                    config.read(path, encoding="utf-8")
+                    token = json.loads(config["gdrive"]["token"])
+                    token["expiry"] = "1970-01-01T00:00:00Z"
+                    forced_token = json.dumps(token)
+                    config["gdrive"]["token"] = forced_token
+                    with path.open("w", encoding="utf-8") as f:
+                        config.write(f)
+                    return self._run(args, path, timeout)
             finally:
                 # rclone refreshes tokens in its config. Persist the refresh only
                 # if the connection has not been replaced by another UI request.
                 refreshed = configparser.RawConfigParser()
-                refreshed.read(path)
+                refreshed.read(path, encoding="utf-8")
                 if refreshed.has_option("gdrive", "token"):
                     token = refreshed.get("gdrive", "token")
                     current = self.store.settings()["drive_token"]
-                    if token != settings["drive_token"] and current == settings["drive_token"]:
-                        self.store.save_settings({"drive_token": token})
+                    if token != settings["drive_token"] and token != forced_token:
+                        if persist_token and current == settings["drive_token"]:
+                            self.store.save_settings({"drive_token": token})
                         settings["drive_token"] = token
 
     def targets(self, settings):
@@ -147,14 +179,25 @@ class Destinations:
         self.run(settings, ["lsjson", target, "--max-depth", "1", "--dirs-only"])
         return {"message": "Connection works. Upload permission is checked during the first backup."}
 
-    def folders(self, folder_id="root"):
+    def folders(self, folder_id="root", settings=None):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", folder_id):
             raise BackupError("Invalid folder ID.")
-        settings = self.store.settings()
+        persist_token = settings is None
+        settings = self.store.settings() if settings is None else settings
         if not settings["drive_token"]:
             raise BackupError("Connect Google Drive first.")
-        data = json.loads(self.run(settings, ["lsjson", "gdrive:", "--dirs-only", "--max-depth", "1"], root_id=folder_id))
-        return sorted([{"id": item["ID"], "name": item["Name"]} for item in data if item.get("ID")], key=lambda f: f["name"].lower())
+        output = self.run(settings, ["lsjson", "gdrive:", "--dirs-only", "--max-depth", "1"],
+                          root_id=folder_id, persist_token=persist_token)
+        try:
+            data = json.loads(output)
+            if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+                raise ValueError()
+            folders = [{"id": item["ID"], "name": item["Name"]} for item in data if item.get("ID")]
+            if any(not isinstance(folder["id"], str) or not isinstance(folder["name"], str) for folder in folders):
+                raise ValueError()
+        except (ValueError, KeyError, TypeError):
+            raise BackupError("Google Drive returned an unreadable folder listing. Try again or reconnect Google Drive.") from None
+        return sorted(folders, key=lambda f: f["name"].lower())
 
     def upload(self, archive, stack_key, existing=None):
         settings, receipts, errors = self.store.settings(), dict(existing or {}), []
