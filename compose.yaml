@@ -1,7 +1,6 @@
 services:
   cloud-backup:
-    build: .
-    image: docker-cloud-backup:local
+    image: ghcr.io/hjennerway/docker-cloud-backup:latest
     restart: unless-stopped
     init: true
     stop_grace_period: 3m

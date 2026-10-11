@@ -9,7 +9,7 @@ git clone https://github.com/hjennerway/docker-cloud-backup.git
 cd docker-cloud-backup
 cp .env.example .env
 # Optionally set ADMIN_PASSWORD in .env; otherwise a random one is generated.
-docker compose up -d --build
+docker compose up -d --pull always
 docker compose exec cloud-backup cat /data/admin-password.txt
 ```
 
@@ -24,20 +24,23 @@ The app uses the local Docker socket. A second Dockge agent is a separate Docker
 
 ## Dockge
 
-Create a stack named `cloud-backup` in Dockge. Paste `compose.yaml`, replacing `build: .` with:
+Create a stack named `cloud-backup` in Dockge and paste `compose.yaml`. It uses the published image `ghcr.io/hjennerway/docker-cloud-backup:latest`; no Git checkout or image build is needed on the Docker host. When migrating an existing stack, remove its `build` and `pull_policy: build` entries, replace `image` with that reference, and keep its existing ports, environment and volumes.
 
-```yaml
-build:
-  context: https://github.com/hjennerway/docker-cloud-backup.git#main
-```
-
-For a reproducible deployment, replace `main` with the full tested commit SHA. Deploy, open port 8088, and retrieve the generated password using the container's Bash terminal:
+Deploy, open port 8088, and retrieve the generated password using the container's Bash terminal:
 
 ```sh
 cat /data/admin-password.txt
 ```
 
-To update a pinned deployment, change the SHA and rebuild/redeploy. The `backup-data` named volume preserves schedules, mappings, encrypted destination credentials, job history and local archives. Keep that volume and its `secret.key` together. The app excludes its own stack from backup, so it cannot stop itself. Back up its data volume separately while the app is stopped if you want to preserve the app's own state.
+Use Dockge's **Update** button to pull the current `latest` image and recreate the container. Publishing a new image does not automatically restart Dockge stacks. For a reproducible deployment or rollback, use `ghcr.io/hjennerway/docker-cloud-backup:sha-<full commit SHA>` instead of `latest`.
+
+The `backup-data` named volume preserves schedules, mappings, encrypted destination credentials, job history and local archives. Keep that volume and its `secret.key` together. The app excludes its own stack from backup, so it cannot stop itself. Back up its data volume separately while the app is stopped if you want to preserve the app's own state.
+
+## Container publishing
+
+The **Checks** GitHub Actions workflow runs unit tests, validates Compose, builds the image and runs Docker integration tests. Successful pushes to `main` then call `publish.yml` to publish Linux AMD64 and ARM64 images to [GitHub Container Registry](https://github.com/hjennerway/docker-cloud-backup/pkgs/container/docker-cloud-backup), tagged `latest` and `sha-<full commit SHA>`. Pull requests run checks without publishing. You can also run **Checks** manually on `main` from the Actions page. Publishing uses the built-in `GITHUB_TOKEN` with `packages: write`; no registry password secret is needed.
+
+New GHCR packages default to private, even for public repositories. After the first publish, make the container package public in its package settings to allow unauthenticated pulls. If keeping it private, authenticate to `ghcr.io` on the Docker host with a personal access token (classic) granting `read:packages`, and make those credentials available to Dockge's Docker client. See [GitHub's Container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
 
 ## What is backed up
 

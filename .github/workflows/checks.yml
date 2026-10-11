@@ -2,8 +2,12 @@ name: Checks
 on:
   push:
   pull_request:
+  workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -20,3 +24,10 @@ jobs:
       - run: pytest -q tests/test_docker_integration.py
         env:
           RUN_DOCKER_TESTS: '1'
+  publish:
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/publish.yml
