@@ -46,6 +46,7 @@ SEED_RULES = [
         ("*/otterwiki", ["/app-data"], []),
         ("*/home-assistant", ["/config"], ["*.log*", "tts/**"]),
         ("*/frigate", ["/config"], []),
+        ("*/dashy", ["/app/user-data"], []),
     ]
 ]
 
@@ -83,6 +84,13 @@ class Store:
                     db.execute("INSERT OR IGNORE INTO rules VALUES (?,?,?)", (
                         rule["pattern"], json.dumps(rule["paths"]), json.dumps(rule["excludes"])))
                 db.execute("INSERT INTO settings VALUES ('seeded','true')")
+            # Add the new mapping to existing installations once, preserving
+            # custom rules and subsequent intentional deletion of this seed.
+            if not db.execute("SELECT 1 FROM settings WHERE key='seeded_dashy_v1'").fetchone():
+                rule = next(r for r in SEED_RULES if r["pattern"] == "*/dashy")
+                db.execute("INSERT OR IGNORE INTO rules VALUES (?,?,?)", (
+                    rule["pattern"], json.dumps(rule["paths"]), json.dumps(rule["excludes"])))
+                db.execute("INSERT INTO settings VALUES ('seeded_dashy_v1','true')")
         self.path.chmod(0o600)
 
     @contextmanager

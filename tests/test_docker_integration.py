@@ -102,3 +102,45 @@ def test_real_named_volume_backup_restart_and_restore(tmp_path, mode):
         for volume in volumes:
             volume.remove()
         client.close()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(os.getenv("RUN_DOCKER_TESTS") != "1", reason="Set RUN_DOCKER_TESTS=1 after building the app image")
+@pytest.mark.parametrize("image", ["docker-cloud-backup:local", "eclipse-mosquitto:2"])
+def test_real_container_local_config_size_without_copying_or_stopping(tmp_path, image):
+    """Exercise both GNU and BusyBox metadata tools on disposable containers."""
+    client = docker.from_env(timeout=30)
+    container = None
+    try:
+        client.images.get(image)  # Do not pull unrelated test images automatically.
+    except docker.errors.ImageNotFound:
+        client.close()
+        pytest.skip("Size-scan fixture image is not available locally")
+    try:
+        container = client.containers.create(image, ["sleep", "3600"],
+            entrypoint=[], name="cloud-backup-size-test-" + uuid.uuid4().hex[:8])
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as archive:
+            for name, content in [("size-test/conf.yml", b"12345"), ("size-test/cache/skip", b"1234567890")]:
+                member = tarfile.TarInfo(name)
+                member.size = len(content)
+                archive.addfile(member, io.BytesIO(content))
+        container.put_archive("/tmp", stream.getvalue())
+        container.start()
+        discovery = Discovery(client, Store(tmp_path / "data"), tmp_path / "host")
+        info = {"id": container.id, "name": container.name, "state": "running", "mounts": []}
+        assert discovery.container_size(info, "/tmp/size-test", ["cache/**"]) == 5
+        assert discovery.container_size(info, "/tmp/size-test") == 15
+        container.reload()
+        assert container.status == "running"
+        container.stop(timeout=1)
+        info["state"] = "exited"
+        metadata = discovery.check_path(container.id, container.name, "/tmp/size-test/conf.yml")
+        assert discovery.container_size(info, "/tmp/size-test/conf.yml", metadata=metadata) == 5
+        assert discovery.container_size(info, "/tmp/size-test", ["cache/**"]) is None
+        container.reload()
+        assert container.status == "exited"
+    finally:
+        if container is not None:
+            container.remove(force=True)
+        client.close()

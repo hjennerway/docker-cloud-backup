@@ -1,6 +1,9 @@
+import base64
 import fnmatch
 import hashlib
+import json
 import os
+import posixpath
 import re
 import stat
 import time
@@ -56,10 +59,18 @@ class Discovery:
             response = api.head(api._url('/containers/{0}/archive', container_id), params={"path": path}, timeout=30)
             try:
                 api._raise_for_status(response)
+                header = getattr(response, "headers", {}).get("X-Docker-Container-Path-Stat")
+                try:
+                    metadata = json.loads(base64.b64decode(header)) if header else {}
+                except (ValueError, TypeError):
+                    metadata = {}
+                if not isinstance(metadata, dict):
+                    metadata = {}
             finally:
                 response.close()
         except Exception:
             raise BackupError(f"Config path {path} is missing or not readable in {name}. Update its backup selection or image mapping.") from None
+        return metadata
 
     def validate_mapping(self, rule):
         rules = [r for r in self.store.rules() if r["pattern"] != rule["pattern"]] + [rule]
@@ -76,7 +87,7 @@ class Discovery:
             checked += 1
         return checked
 
-    def volume_size(self, source):
+    def volume_size(self, source, excludes=()):
         """Logical file bytes; never follow symlinks or download container data.
 
         Bound scans and cache them so dashboard polling cannot repeatedly walk
@@ -84,18 +95,23 @@ class Discovery:
         """
         if not source:
             return None
+        key = (source, tuple(excludes))
         now = time.monotonic()
-        cached = self._size_cache.get(source)
+        cached = self._size_cache.get(key)
         if cached and now - cached[0] < 60:
             return cached[1]
         size, count = 0, 0
         try:
-            pending = [self.host_path(source)]
+            root = self.host_path(source)
+            pending = [root]
             while pending:
                 path = pending.pop()
                 count += 1
                 if count > 100000 or time.monotonic() - now > 1:
                     raise OSError("Size scan limit reached")
+                relative = path.relative_to(root).as_posix() if path != root else ""
+                if self.excluded(relative, excludes):
+                    continue
                 info = path.lstat()
                 if stat.S_ISREG(info.st_mode):
                     size += info.st_size
@@ -109,8 +125,87 @@ class Discovery:
             size = None
         if len(self._size_cache) > 1000:
             self._size_cache.clear()
-        self._size_cache[source] = (time.monotonic(), size)
+        self._size_cache[key] = (time.monotonic(), size)
         return size
+
+    @staticmethod
+    def excluded(relative, excludes):
+        return any(fnmatch.fnmatchcase(relative, pattern) or
+                   (pattern.endswith("/**") and relative == pattern[:-3]) for pattern in excludes)
+
+    def container_size(self, container, path, excludes=(), metadata=None):
+        """Estimate only the selected files, including config outside mounts.
+
+        Prefer the read-only host mount. For running containers, a bounded,
+        shell-free metadata scan is a fallback; never download live file data
+        or start a stopped container just to display a size.
+        """
+        covering = sorted((m for m in container["mounts"] if
+                           path == m["destination"] or path.startswith(m["destination"].rstrip("/") + "/")),
+                          key=lambda m: len(m["destination"]), reverse=True)
+        # A nested mount has its own source, rather than the parent's host files.
+        nested = [m for m in container["mounts"] if m["destination"].startswith(path.rstrip("/") + "/")]
+        included_nested = [m for m in nested if not self.excluded(m["destination"][len(path.rstrip("/")) + 1:], excludes)]
+        if covering and not included_nested and covering[0]["source"]:
+            mount = covering[0]
+            suffix = path[len(mount["destination"].rstrip("/")):].lstrip("/")
+            size = self.volume_size(str(PurePosixPath(mount["source"]) / suffix), excludes)
+            if size is not None:
+                return size
+
+        # Docker uses Go FileMode bits, rather than POSIX stat type bits.
+        file_types = sum(1 << bit for bit in (31, 27, 26, 25, 24, 21, 19))
+        if metadata and isinstance(metadata.get("mode"), int) and not metadata["mode"] & file_types:
+            size = metadata.get("size")
+            if isinstance(size, int) and size >= 0:
+                return size
+
+        if container["state"] != "running":
+            return None
+        key = ("container", container["id"], path, tuple(excludes))
+        now = time.monotonic()
+        cached = self._size_cache.get(key)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        size = None
+        try:
+            result = self.client.containers.get(container["id"]).exec_run(
+                ["timeout", "-s", "KILL", "2", "find", path, "-type", "f", "-exec",
+                 "stat", "-c", "%s %n", "--", "{}", "+"], stderr=False)
+            if result.exit_code != 0:
+                raise ValueError("Metadata scan unavailable")
+            lines = result.output.decode("utf-8").splitlines()
+            if len(lines) > 100000:
+                raise ValueError("Size scan limit reached")
+            size = 0
+            for line in lines:
+                value, filename = line.split(" ", 1)
+                if filename != path and not filename.startswith(path.rstrip("/") + "/"):
+                    raise ValueError("Invalid metadata path")
+                relative = filename[len(path.rstrip("/")) + 1:] if filename != path else ""
+                amount = int(value)
+                if amount < 0:
+                    raise ValueError("Invalid metadata size")
+                if not self.excluded(relative, excludes):
+                    size += amount
+        except Exception:
+            size = None
+        if len(self._size_cache) > 1000:
+            self._size_cache.clear()
+        self._size_cache[key] = (time.monotonic(), size)
+        return size
+
+    def backup_size(self, stack):
+        """Approximate uncompressed selected contents plus Compose inputs."""
+        if not stack["compose_files"]:
+            return None
+        sizes = [item.get("size_bytes") for c in stack["containers"] for item in c["backup_paths"]]
+        try:
+            files, _ = self.compose_bundle(stack)
+            sizes.extend(self.volume_size(file) for file in files)
+        except (BackupError, OSError, ValueError, TypeError, AttributeError):
+            return None
+        return None if any(size is None for size in sizes) else sum(sizes)
 
     def stack_volumes(self, stack, include_sizes=True):
         volumes = {}
@@ -133,7 +228,7 @@ class Discovery:
             volume["size_bytes"] = self.volume_size(volume["source"]) if include_sizes else None
         return sorted(volumes.values(), key=lambda v: (v["name"], v["id"]))
 
-    def configure_stack(self, stack, selection):
+    def configure_stack(self, stack, selection, include_sizes=False):
         """Resolve persisted choices against current containers, failing closed."""
         stack["backup_selection"] = selection
         issues = []
@@ -183,7 +278,9 @@ class Discovery:
         for container in containers.values():
             for item in container["backup_paths"]:
                 try:
-                    self.check_path(container["id"], container["name"], item["path"])
+                    metadata = self.check_path(container["id"], container["name"], item["path"])
+                    if include_sizes:
+                        item["size_bytes"] = self.container_size(container, item["path"], item["excludes"], metadata)
                 except BackupError as exc:
                     issues.append(str(exc))
         return issues
@@ -283,7 +380,9 @@ class Discovery:
             if not stack["containers"]:
                 stack["issues"].append("Inactive stack: create its containers before backing up config.")
             stack["volumes"] = self.stack_volumes(stack, include_sizes)
-            stack["issues"].extend(self.configure_stack(stack, self.store.backup_selection(stack["name"])))
+            selection_issues = self.configure_stack(stack, self.store.backup_selection(stack["name"]), include_sizes)
+            stack["issues"].extend(selection_issues)
+            stack["backup_size_bytes"] = self.backup_size(stack) if include_sizes and not selection_issues else None
             for file in stack["compose_files"]:
                 try:
                     if not self.host_path(file).is_file():
@@ -327,7 +426,6 @@ class Discovery:
                 raise BackupError("Unsupported variable in a Compose file reference.")
             full = str(workdir / value) if not value.startswith("/") else value
             # Normalize ../ references, which Compose supports, before host checks.
-            import posixpath
             full = posixpath.normpath(full)
             if self.host_path(full).is_file():
                 files.add(full)

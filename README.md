@@ -54,7 +54,7 @@ Docker Compose projects are grouped by labels. Saved inactive Dockge stacks are 
 
 ## Image mappings
 
-Mappings live in SQLite (`/data/backup.sqlite3`) and are edited in **Image mappings**. Seed rules cover common Sonarr, Radarr, Prowlarr, SABnzbd, qBittorrent, Seerr/Jellyseerr, Jellyfin, Uptime Kuma, Portainer, Mosquitto, n8n, go2rtc, NetAlertX, Dockge, Otter Wiki, Home Assistant and Frigate images.
+Mappings live in SQLite (`/data/backup.sqlite3`) and are edited in **Image mappings**. Seed rules cover common Sonarr, Radarr, Prowlarr, SABnzbd, qBittorrent, Seerr/Jellyseerr, Jellyfin, Uptime Kuma, Portainer, Mosquitto, n8n, go2rtc, NetAlertX, Dockge, Otter Wiki, Home Assistant, Frigate and Dashy images.
 
 - Use a repository pattern without tag or digest, e.g. `lscr.io/linuxserver/sonarr` or `*/sonarr`.
 - A bare image like `eclipse-mosquitto:2` normalizes to `library/eclipse-mosquitto`.
@@ -69,6 +69,10 @@ NetAlertX seed paths use the current `/data/config` and `/data/db` layout. Older
 ## Choosing volumes or config files
 
 The **Stacks → Volumes** column lists each mounted named/anonymous volume and bind mount with its uncompressed file size. Shared mounts are listed once per stack. Sizes are cached for about a minute and do not follow child symlinks. An inaccessible host mount or a scan exceeding the time/file limit shows **Size unavailable**, not zero; it can still be selected and read through Docker. Narrowing `/host` may make sizes unavailable. Inactive stacks need their containers created before mounted volumes can be discovered.
+
+The **Backup contents** column shows the saved choice and its approximate uncompressed size, for example **Config files — ≈5 MB** or **Selected volumes — ≈50 MB**. Totals include Compose inputs, honor config exclusions, and count shared selected volumes once. They estimate file contents before compression, rather than the final archive size. Host scans are bounded and cached for about a minute. For container-local config or inaccessible host storage, running containers are measured using a two-second metadata scan with `timeout`, `find` and `stat`, without a shell or downloading file contents. Images without those utilities, incomplete scans and unreadable paths show **Size unavailable**. Stopped containers remain stopped; individual file sizes can still be read through Docker metadata.
+
+Dashy's mapping includes `/app/user-data`, covering its config, additional pages and assets even when that folder is stored inside the container. A Dashy Compose file with its `volumes:` section commented out has no mounted volume, so an empty volume list is expected; use automatic config mappings. The new Dashy mapping is added once to existing installations without overwriting a custom mapping.
 
 Use **Choose contents** on a stack to select one of:
 

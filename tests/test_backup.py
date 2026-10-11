@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import tarfile
@@ -205,6 +206,128 @@ def test_volume_discovery_deduplicates_mounts_and_reports_file_sizes(fixture):
     assert f.discovery.volume_size("/volumes/db") == 5  # Cached between polls.
     f.discovery._size_cache.clear()
     assert f.discovery.volume_size("/volumes/db") == 0
+
+
+@pytest.mark.parametrize("mode", ["auto", "manual", "volumes"])
+def test_selected_size_includes_compose_and_only_chosen_contents(fixture, mode):
+    f = fixture
+    for name in ("db", "web", "stopped"):
+        folder = f.discovery.host_root / "volumes" / name
+        (folder / "cache").mkdir(parents=True)
+        (folder / "settings.json").write_bytes(b"12345")
+        (folder / "cache/trash").write_bytes(b"1234567890")
+    (f.discovery.host_root / "media").write_bytes(b"unselected media")
+    if mode == "manual":
+        f.store.save_backup_selection("sample", {"mode": mode, "volumes": [], "paths": {"web": ["/config/settings.json"]}})
+        expected = 5
+    elif mode == "volumes":
+        f.web.attrs["Mounts"][0] = dict(f.db.attrs["Mounts"][0])
+        volume = next(v for v in f.discovery.get("sample")["volumes"] if v["name"] == "db-config")
+        f.store.save_backup_selection("sample", {"mode": mode, "volumes": [volume["id"], volume["id"]], "paths": {}})
+        expected = 15  # Shared selected mount counted once; whole volume includes cache.
+    else:
+        expected = 15  # Three config directories, each excluding cache.
+    files, _ = f.discovery.compose_bundle(f.discovery.get("sample"))
+    expected += sum(f.discovery.host_path(file).stat().st_size for file in files)
+    stack = f.discovery.stacks()[0]
+    assert not stack["issues"]
+    assert stack["backup_size_bytes"] == expected
+    assert f.events == []  # Size estimation never stops containers or copies data.
+
+
+def test_selection_size_unknown_when_any_selected_path_is_unreadable(fixture):
+    assert fixture.discovery.stacks()[0]["backup_size_bytes"] is None
+
+
+@pytest.mark.parametrize("compose", [None, "services: [invalid]", "not-a-compose-mapping"])
+def test_unavailable_compose_input_does_not_break_size_discovery(fixture, compose):
+    f = fixture
+    if compose is None:
+        for container in f.client.items.values():
+            container.labels.pop("com.docker.compose.project.config_files")
+        (f.folder / "compose.yaml").unlink()
+    else:
+        (f.folder / "compose.yaml").write_text(compose)
+    stack = f.discovery.stacks()[0]
+    assert stack["backup_size_bytes"] is None
+
+
+def test_unmounted_config_metadata_scan_respects_exclusions_and_caches(fixture):
+    f = fixture
+    calls = []
+    def scan(command, **kwargs):
+        calls.append(command)
+        assert kwargs == {"stderr": False}
+        return SimpleNamespace(exit_code=0, output=b"5 /config/settings.json\n10 /config/cache/skip\n3 /config/logs/a b.log\n")
+    f.db.exec_run = scan
+    container = f.discovery.get("sample")["containers"][0]
+    assert f.discovery.container_size(container, "/config", ["cache/**", "logs/**"]) == 5
+    assert calls == [["timeout", "-s", "KILL", "2", "find", "/config", "-type", "f", "-exec",
+                      "stat", "-c", "%s %n", "--", "{}", "+"]]
+    assert f.discovery.container_size(container, "/config", ["cache/**", "logs/**"]) == 5
+    assert len(calls) == 1
+    container["state"] = "exited"
+    assert f.discovery.container_size(container, "/config", ["cache/**", "logs/**"]) is None
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("exit_code,output", [(137, b"5 /config/partial\n"), (0, b"bad output"), (0, b"5 /outside\n")])
+def test_incomplete_container_metadata_scan_is_unknown(fixture, exit_code, output):
+    fixture.db.exec_run = lambda *args, **kwargs: SimpleNamespace(exit_code=exit_code, output=output)
+    container = fixture.discovery.get("sample")["containers"][0]
+    assert fixture.discovery.container_size(container, "/config") is None
+
+
+def test_stopped_file_size_uses_docker_head_metadata_without_starting(fixture):
+    f = fixture
+    metadata = {"size": 12, "mode": 0o640}
+    closed = []
+    f.client.api.head = lambda *args, **kwargs: SimpleNamespace(
+        headers={"X-Docker-Container-Path-Stat": base64.b64encode(json.dumps(metadata).encode()).decode()},
+        close=lambda: closed.append(True))
+    container = next(c for c in f.discovery.get("sample")["containers"] if c["state"] == "exited")
+    info = f.discovery.check_path(container["id"], container["name"], "/internal/settings.yml")
+    assert f.discovery.container_size(container, "/internal/settings.yml", metadata=info) == 12
+    assert f.discovery.container_size(container, "/internal", metadata={"size": 4096, "mode": 1 << 31}) is None
+    assert closed and f.events == []
+
+
+@pytest.mark.parametrize("image", ["lissy93/dashy:latest", "ghcr.io/lissy93/dashy:4.0.0"])
+def test_dashy_without_mounts_is_backed_up_using_config_mapping(fixture, image):
+    f = fixture
+    f.client.items = {f.db.id: f.db}
+    f.db.attrs.update(Config={"Image": image, "Env": []}, Mounts=[])
+    f.db.archives = {"/app/user-data": {"user-data/conf.yml": b"pageInfo: {}\n"}}
+    f.db.exec_run = lambda *args, **kwargs: SimpleNamespace(exit_code=0, output=b"13 /app/user-data/conf.yml\n")
+    (f.folder / "compose.yaml").write_text("services:\n  db:\n    image: " + image + "\n")
+    stack = f.discovery.stacks()[0]
+    assert stack["volumes"] == []  # Container-local config must not be mislabeled as a volume.
+    assert not stack["issues"]
+    assert stack["containers"][0]["backup_paths"][0]["path"] == "/app/user-data"
+    assert stack["backup_size_bytes"] == 13 + (f.folder / "compose.yaml").stat().st_size + (f.folder / ".env").stat().st_size
+    assert f.events == []
+    job = run_backup(f)
+    assert job["status"] == "success", job["detail"]
+    with tarfile.open(f.engine.archive_dir / job["archive"]) as tar:
+        name = next(name for name in tar.getnames() if name.endswith("user-data/conf.yml"))
+        assert tar.extractfile(name).read() == b"pageInfo: {}\n"
+
+
+@pytest.mark.parametrize("customized", [False, True])
+def test_dashy_seed_migrates_existing_store_once_without_overwriting(tmp_path, customized):
+    store = Store(tmp_path)
+    store.execute("DELETE FROM settings WHERE key='seeded_dashy_v1'")
+    if customized:
+        store.execute("UPDATE rules SET paths=? WHERE pattern='*/dashy'", ('["/custom/conf.yml"]',))
+    else:
+        store.execute("DELETE FROM rules WHERE pattern='*/dashy'")
+    store.execute("DELETE FROM rules WHERE pattern='*/sonarr'")
+    store = Store(tmp_path)
+    rule = next(r for r in store.rules() if r["pattern"] == "*/dashy")
+    assert rule["paths"] == (["/custom/conf.yml"] if customized else ["/app/user-data"])
+    assert not any(r["pattern"] == "*/sonarr" for r in store.rules())
+    store.execute("DELETE FROM rules WHERE pattern='*/dashy'")
+    assert not any(r["pattern"] == "*/dashy" for r in Store(tmp_path).rules())
 
 
 @pytest.mark.parametrize("multiple", [False, True])
