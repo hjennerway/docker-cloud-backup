@@ -34,7 +34,13 @@ class FakeContainer:
                        "com.docker.compose.project.config_files": "/stacks/sample/compose.yaml",
                        "com.docker.compose.project.working_dir": "/stacks/sample"}
         self.attrs = {"Config": {"Image": "test/service:latest", "Env": []},
-                      "Mounts": [{"Type": "volume", "Destination": "/config"}, {"Type": "bind", "Destination": "/media"}]}
+                      "Mounts": [{"Type": "volume", "Destination": "/config", "Name": name + "-config", "Source": "/volumes/" + name},
+                                 {"Type": "bind", "Destination": "/media", "Source": "/media"}]}
+        self.archives = {
+            "/config": {"config/settings.json": b'{"ok": true}', "config/cache/trash": b"not needed"},
+            "/media": {"media/movie": b"selected media"},
+            "/config/settings.json": {"settings.json": b'{"ok": true}'},
+        }
 
     def reload(self):
         pass
@@ -54,10 +60,9 @@ class FakeContainer:
     def get_archive(self, path, **kwargs):
         self.events.append("archive:" + self.name)
         assert self.status != "running"
-        assert path == "/config"
         if self.fail_archive:
             raise RuntimeError("archive failed")
-        return iter([tar_bytes({"config/settings.json": b'{"ok": true}', "config/cache/trash": b"not needed"})]), {}
+        return iter([tar_bytes(self.archives[path])]), {}
 
 
 class FakeClient:
@@ -169,6 +174,185 @@ def test_missing_config_preflight_prevents_stop(fixture):
     assert job["status"] == "failed"
     assert "not readable" in job["detail"]
     assert fixture.events == []
+
+
+def test_auto_mapping_checks_paths_on_discovery_and_closes_response(fixture):
+    closed = []
+    fixture.client.api.head = lambda *a, **kw: SimpleNamespace(close=lambda: closed.append(True))
+    fixture.client.api._raise_for_status = lambda response: (_ for _ in ()).throw(RuntimeError("missing"))
+    stack = fixture.discovery.get("sample")
+    assert len(closed) == 3
+    assert all("/config" in issue and "not readable" in issue for issue in stack["issues"])
+    assert fixture.events == []
+
+
+def test_volume_discovery_deduplicates_mounts_and_reports_file_sizes(fixture):
+    f = fixture
+    config = f.discovery.host_root / "volumes/db"
+    config.mkdir(parents=True)
+    (config / "data").write_bytes(b"12345")
+    (config / "empty").mkdir()
+    (f.discovery.host_root / "media").write_bytes(b"123")
+    f.web.attrs["Mounts"][0] = dict(f.db.attrs["Mounts"][0])
+    volumes = f.discovery.stacks()[0]["volumes"]
+    assert len(volumes) == 3
+    by_name = {v["name"]: v for v in volumes}
+    assert by_name["db-config"]["size_bytes"] == 5
+    assert len(by_name["db-config"]["mounts"]) == 2
+    assert by_name["/media"]["size_bytes"] == 3
+    assert by_name["stopped-config"]["size_bytes"] is None
+    (config / "data").unlink()
+    assert f.discovery.volume_size("/volumes/db") == 5  # Cached between polls.
+    f.discovery._size_cache.clear()
+    assert f.discovery.volume_size("/volumes/db") == 0
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+def test_selected_volumes_work_without_rules_and_skip_unselected_mounts(fixture, multiple):
+    f = fixture
+    f.store.execute("DELETE FROM rules")
+    f.web.attrs["Mounts"][0] = dict(f.db.attrs["Mounts"][0])
+    volumes = f.discovery.get("sample")["volumes"]
+    wanted = {"db-config", "/media"} if multiple else {"db-config"}
+    ids = [v["id"] for v in volumes if v["name"] in wanted]
+    f.store.save_backup_selection("sample", {"mode": "volumes", "volumes": ids, "paths": {}})
+    job = run_backup(f)
+    assert job["status"] == "success", job["detail"]
+    assert f.events.count("archive:db") == len(ids)
+    assert "archive:web" not in f.events and "archive:stopped" not in f.events
+    assert f.web.status == f.db.status == "running" and f.stopped.status == "exited"
+    with tarfile.open(f.engine.archive_dir / job["archive"]) as tar:
+        names = tar.getnames()
+        assert sum(n.endswith("settings.json") for n in names) == 1
+        assert any(n.endswith("cache/trash") for n in names)  # Whole volume, no rule exclusions.
+        assert any(n.endswith("media/movie") for n in names) == multiple
+        manifest = json.load(tar.extractfile("manifest.json"))
+        assert len(manifest["volumes"]) == len(ids)
+        shared = next(v for v in manifest["volumes"] if v["name"] == "db-config")
+        assert len(shared["mounts"]) == 2
+        assert manifest["backup_selection"]["mode"] == "volumes"
+
+
+def test_nested_mount_is_not_included_with_parent_volume(fixture):
+    f = fixture
+    f.db.attrs["Mounts"].append({"Type": "bind", "Source": "/nested", "Destination": "/config/media"})
+    f.db.archives["/config"]["config/media/movie"] = b"unselected"
+    volume = next(v for v in f.discovery.get("sample")["volumes"] if v["name"] == "db-config")
+    f.store.save_backup_selection("sample", {"mode": "volumes", "volumes": [volume["id"]], "paths": {}})
+    job = run_backup(f)
+    assert job["status"] == "success"
+    with tarfile.open(f.engine.archive_dir / job["archive"]) as tar:
+        assert not any("media" in n for n in tar.getnames())
+
+
+def test_manual_file_selection_survives_store_reopen_and_ignores_rules(fixture):
+    f = fixture
+    f.store.execute("DELETE FROM rules")
+    selection = {"mode": "manual", "volumes": [], "paths": {"web": ["/config/settings.json"]}}
+    f.store.save_backup_selection("sample", selection)
+    assert Store(f.store.root).backup_selection("sample") == selection
+    job = run_backup(f)
+    assert job["status"] == "success", job["detail"]
+    with tarfile.open(f.engine.archive_dir / job["archive"]) as tar:
+        paths = [n for n in tar.getnames() if n.startswith("containers/")]
+        assert len(paths) == 1 and paths[0].endswith("/settings.json")
+    assert "archive:db" not in f.events
+
+
+def test_empty_manual_services_do_not_block_after_removal(fixture):
+    selection = {"mode": "manual", "volumes": [], "paths": {"removed": [], "web": ["/config"]}}
+    fixture.store.save_backup_selection("sample", selection)
+    assert not fixture.discovery.get("sample")["issues"]
+
+
+def test_volume_selection_survives_container_recreation(fixture):
+    f = fixture
+    volume = next(v for v in f.discovery.get("sample")["volumes"] if v["name"] == "db-config")
+    f.store.save_backup_selection("sample", {"mode": "volumes", "volumes": [volume["id"]], "paths": {}})
+    f.db.id = "new-container-id"
+    f.client.items = {c.id: c for c in (f.db, f.web, f.stopped)}
+    stack = f.discovery.get("sample")
+    assert not stack["issues"]
+    selected = next(c for c in stack["containers"] if c["id"] == "new-container-id")
+    assert selected["backup_paths"][0]["volume_id"] == volume["id"]
+
+
+@pytest.mark.parametrize("selection", [
+    {"mode": "volumes", "volumes": ["removed"], "paths": {}},
+    {"mode": "volumes", "volumes": [], "paths": {}},
+    {"mode": "manual", "volumes": [], "paths": {"removed": ["/config"]}},
+    {"mode": "manual", "volumes": [], "paths": {}},
+])
+def test_invalid_saved_selections_never_stop_containers(fixture, selection):
+    fixture.store.save_backup_selection("sample", selection)
+    job = run_backup(fixture)
+    assert job["status"] == "failed"
+    assert fixture.events == []
+
+
+def test_paths_are_rechecked_after_discovery_before_stopping(fixture):
+    f = fixture
+    calls = []
+    def head(*args, **kwargs):
+        calls.append(kwargs["params"]["path"])
+        if len(calls) > 3:
+            raise RuntimeError("Path disappeared")
+        return SimpleNamespace(close=lambda: None)
+    f.client.api.head = head
+    job = run_backup(f)
+    assert job["status"] == "failed" and "not readable" in job["detail"]
+    assert f.events == []
+
+
+def test_selection_and_mapping_api_validate_before_saving(fixture):
+    from fastapi.testclient import TestClient
+    from app.main import create_app
+    f = fixture
+    app = create_app(f.store, f.client, start_worker=False)
+    app.state.engine = f.engine
+    headers = {"X-Requested-With": "cloud-backup"}
+    def head(*args, **kwargs):
+        if kwargs["params"]["path"] == "/missing":
+            raise RuntimeError("missing")
+        return SimpleNamespace(close=lambda: None)
+    f.client.api.head = head
+    with TestClient(app) as client:
+        endpoint = "/api/stacks/sample/selection"
+        assert client.put(endpoint, json={"mode": "auto"}, headers=headers).status_code == 401
+        client.post("/api/login", json={"password": "test-password-only"}, headers=headers)
+        original = next(r for r in f.store.rules() if r["pattern"] == "test/service")
+        response = client.put("/api/rules", json={**original, "paths": ["/missing"]}, headers=headers)
+        assert response.status_code == 400 and "/missing" in response.json()["detail"]
+        assert next(r for r in f.store.rules() if r["pattern"] == "test/service") == original
+        response = client.put("/api/rules", json=original, headers=headers)
+        assert response.json()["checked_containers"] == 3
+        response = client.put("/api/rules", json={"pattern": "future/image", "paths": ["/missing"]}, headers=headers)
+        assert response.json()["checked_containers"] == 0
+        for selection in [
+            {"mode": "manual", "paths": {"web": ["/missing"]}},
+            {"mode": "manual", "paths": {"web": ["/etc"]}},
+            {"mode": "manual", "paths": {}},
+            {"mode": "volumes", "volumes": ["unknown"]},
+        ]:
+            assert client.put(endpoint, json=selection, headers=headers).status_code == 400
+            assert f.store.backup_selection("sample")["mode"] == "auto"
+        assert client.put(endpoint, json={"mode": "invalid"}, headers=headers).status_code == 422
+        assert client.put(endpoint, json={"mode": "manual", "paths": {"web": ["/config/settings.json"], "db": []}}, headers=headers).status_code == 200
+        assert f.store.backup_selection("sample")["paths"] == {"web": ["/config/settings.json"]}
+        assert client.get("/api/dashboard").json()["stacks"][0]["backup_selection"]["mode"] == "manual"
+        volume = f.discovery.get("sample")["volumes"][0]
+        assert client.put(endpoint, json={"mode": "volumes", "volumes": [volume["id"]]}, headers=headers).status_code == 200
+        assert f.store.backup_selection("sample")["volumes"] == [volume["id"]]
+        assert client.put("/api/stacks/sample/schedule", json={"cron": "0 3 * * *", "timezone": "UTC", "enabled": True}, headers=headers).status_code == 200
+        assert client.put(endpoint, json={"mode": "auto"}, headers=headers).status_code == 200
+        assert f.store.backup_selection("sample") == {"mode": "auto", "paths": {}, "volumes": []}
+
+
+def test_mapping_validation_respects_specific_rule_precedence(fixture):
+    def no_check(*args, **kwargs):
+        pytest.fail("A shadowed rule must not be applied to this container")
+    fixture.client.api.head = no_check
+    assert fixture.discovery.validate_mapping({"pattern": "test/*", "paths": ["/missing"], "excludes": []}) == 0
 
 
 def test_failed_upload_keeps_local_archive_after_restart(fixture):

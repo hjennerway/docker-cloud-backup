@@ -361,16 +361,14 @@ main {
 .stack-table {
   border: 1px solid var(--line);
   border-radius: 10px;
-  overflow: hidden;
+  overflow-x: auto;
   background: #fff;
 }
 .table-head,
 .stack-row {
   display: grid;
-  grid-template-columns: minmax(150px, 1.35fr) minmax(100px, 1fr) minmax(
-      135px,
-      1fr
-    ) minmax(150px, 0.95fr);
+  grid-template-columns: minmax(140px, 1fr) minmax(140px, 0.9fr) minmax(180px, 1.4fr) minmax(125px, 0.9fr) 150px;
+  min-width: 840px;
   align-items: center;
   gap: 17px;
   padding: 19px 23px;
@@ -411,11 +409,49 @@ main {
   overflow-wrap: anywhere;
 }
 .stack-name small,
+.state-cell small,
 .schedule-cell small {
   display: block;
   color: #85958f;
   font-size: 10px;
   margin-top: 6px;
+}
+.state-cell .text-button {
+  margin-top: 8px;
+}
+.volume-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.volume-list li + li {
+  margin-top: 12px;
+}
+.volume-list strong,
+.volume-choice strong {
+  font-size: 11px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.volumes-cell small,
+.volume-choice small {
+  display: block;
+  color: var(--muted);
+  font-size: 10px;
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.check.volume-choice {
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  align-items: flex-start;
+}
+.volume-choice input {
+  flex-shrink: 0;
+}
+.mobile-label {
+  display: none;
 }
 .badge {
   display: inline-flex;
@@ -1067,10 +1103,7 @@ dialog::backdrop {
   }
   .table-head,
   .stack-row {
-    grid-template-columns: minmax(130px, 1.2fr) minmax(90px, 0.85fr) minmax(
-        115px,
-        1fr
-      ) 112px;
+    grid-template-columns: minmax(130px, 1fr) 140px minmax(180px, 1.4fr) 125px 112px;
     gap: 10px;
     padding-left: 17px;
     padding-right: 17px;
@@ -1184,6 +1217,7 @@ dialog::backdrop {
   }
   .stack-row {
     grid-template-columns: 1fr 1fr;
+    min-width: 0;
     padding: 18px;
     gap: 15px;
   }
@@ -1195,6 +1229,17 @@ dialog::backdrop {
   }
   .stack-row .state-cell {
     justify-self: end;
+  }
+  .volumes-cell {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--line);
+    padding-top: 12px;
+  }
+  .mobile-label {
+    display: block;
+    color: var(--muted);
+    font-size: 10px;
+    margin-bottom: 10px;
   }
   .row-actions button {
     padding: 10px;

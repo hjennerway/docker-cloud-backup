@@ -8,6 +8,7 @@ import time
 from contextlib import asynccontextmanager
 from datetime import timedelta
 from pathlib import Path
+from typing import Literal
 from urllib.parse import urlencode, urlparse
 
 import docker
@@ -38,6 +39,12 @@ class Rule(BaseModel):
     pattern: str
     paths: list[str]
     excludes: list[str] = []
+
+
+class BackupSelection(BaseModel):
+    mode: Literal["auto", "volumes", "manual"] = "auto"
+    volumes: list[str] = Field(default_factory=list, max_length=100)
+    paths: dict[str, list[str]] = Field(default_factory=dict, max_length=100)
 
 
 def create_app(store=None, client=None, start_worker=True):
@@ -202,6 +209,26 @@ def create_app(store=None, client=None, start_worker=True):
             raise BackupError(" ".join(stack["issues"]))
         return {"job_id": engine().submit(name)}
 
+    @app.put("/api/stacks/{name:path}/selection")
+    def save_selection(name: str, body: BackupSelection):
+        selection = body.model_dump()
+        if body.mode == "manual":
+            for paths in body.paths.values():
+                validate_rule("manual", paths, [])
+            selection["paths"] = {service: paths for service, paths in body.paths.items() if paths}
+            selection["volumes"] = []
+        elif body.mode == "volumes":
+            selection["paths"] = {}
+        else:
+            selection.update(volumes=[], paths={})
+        discovery = engine().discovery
+        stack = discovery.get(name)
+        issues = discovery.configure_stack(stack, selection)
+        if issues:
+            raise BackupError(" ".join(issues))
+        store.save_backup_selection(name, selection)
+        return {"ok": True}
+
     @app.post("/api/jobs/{job_id}/retry")
     def retry(job_id: str):
         engine().retry_upload(job_id)
@@ -220,8 +247,9 @@ def create_app(store=None, client=None, start_worker=True):
     @app.put("/api/rules")
     def save_rule(body: Rule):
         validate_rule(body.pattern, body.paths, body.excludes)
+        checked = engine().discovery.validate_mapping(body.model_dump())
         store.execute("INSERT OR REPLACE INTO rules VALUES (?,?,?)", (body.pattern, json.dumps(body.paths), json.dumps(body.excludes)))
-        return {"ok": True}
+        return {"ok": True, "checked_containers": checked}
 
     @app.delete("/api/rules/{pattern:path}")
     def delete_rule(pattern: str):

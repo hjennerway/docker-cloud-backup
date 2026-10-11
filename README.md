@@ -15,7 +15,7 @@ docker compose exec cloud-backup cat /data/admin-password.txt
 
 Open `http://YOUR_DOCKER_HOST:8088` and sign in. The generated password file exists only when `ADMIN_PASSWORD` is unset. Keep `.env` out of version control. All schedules start **paused**; discovery never stops a container by itself.
 
-1. Review discovered stacks and their config mappings.
+1. Review discovered stacks and choose automatic config mappings, selected volumes or manual config paths.
 2. Configure and test the SMB destination, and optionally Google Drive.
 3. Run a manual backup and check Activity. Download and test restoring a small archive.
 4. Enable a cron schedule for each stack you want protected.
@@ -43,10 +43,10 @@ To update a pinned deployment, change the SHA and rebuild/redeploy. The `backup-
 
 - Every Compose file listed in `com.docker.compose.project.config_files`, including override files.
 - The stack `.env`, and files explicitly referenced by `env_file`, top-level `configs.file` and `secrets.file`.
-- Only the container paths selected by the matching image rule. This includes bind mounts, named volumes and selected files in the container writable layer, via Docker's archive API.
+- The container paths chosen for each stack: automatic image mappings, one or more complete volumes/bind mounts, or manually entered config files/folders. Data is read via Docker's archive API.
 - A `manifest.json` containing image references, path mappings, original running states and restore information.
 
-**Not included:** base image layers, full container exports, unselected volumes, media/download directories, host-wide files, external Docker secrets/configs, external databases or image build contexts. Images must remain pullable or be rebuilt from separately protected source. SQLite and similar app databases often live in config directories and are included as necessary application state.
+**Not included:** base image layers, full container exports, unselected volumes and media/download directories, host-wide files, external Docker secrets/configs, external databases or image build contexts. Images must remain pullable or be rebuilt from separately protected source. SQLite and similar app databases often live in config directories and are included as necessary application state.
 
 The app reads raw Compose files rather than a substituted `docker compose config` dump. Compose input secrets are deliberately preserved for recovery; downloaded archives must therefore be treated as sensitive.
 
@@ -62,9 +62,21 @@ Mappings live in SQLite (`/data/backup.sqlite3`) and are edited in **Image mappi
 - Enter exact **container** paths, one per line. A file such as `/config/go2rtc.yaml` is supported.
 - Exclusions are relative to each selected directory, e.g. `cache/**` or `logs/**`. A file rule has no child paths to exclude.
 - An empty path list explicitly marks an image as stateless (Compose only).
-- Every mapped path must exist. Missing paths or unknown images stop the job **before** stopping any containers.
+- Every mapped path must exist. Saving a mapping checks its paths in each current container where that rule wins the image match. If none exist yet, the mapping is saved as unverified until discovery. Auto-matched paths are checked during discovery, and missing paths appear as **Needs review**. Backups check again **before** stopping any containers.
 
 NetAlertX seed paths use the current `/data/config` and `/data/db` layout. Older images used `/app/config` and `/app/db`: edit that rule for those versions. Paths differ between publishers; the UI shows actual mounted container paths to help review mappings. The app does not guess that every `/data` directory contains only config.
+
+## Choosing volumes or config files
+
+The **Stacks → Volumes** column lists each mounted named/anonymous volume and bind mount with its uncompressed file size. Shared mounts are listed once per stack. Sizes are cached for about a minute and do not follow child symlinks. An inaccessible host mount or a scan exceeding the time/file limit shows **Size unavailable**, not zero; it can still be selected and read through Docker. Narrowing `/host` may make sizes unavailable. Inactive stacks need their containers created before mounted volumes can be discovered.
+
+Use **Choose contents** on a stack to select one of:
+
+- **Automatically matched config paths** (the default for existing stacks): use image mappings and their exclusions.
+- **One or more volumes**: select any subset of named volumes and bind mounts. Their complete contents are backed up without image mapping exclusions. Shared volumes are archived once, with all mount locations recorded in the manifest. Nested mounts are copied only when separately selected.
+- **Manually specified config files or folders**: enter absolute container paths per Compose service, one per line. Blank services contribute no config paths. At least one path is required; files such as `/config/settings.yaml` are supported. Every replica of a service uses the same paths.
+
+Selections persist across restarts and apply to both manual and scheduled backups. Volume/manual mode does not require image mappings. Missing paths, removed selected volumes or removed selected services prevent backup until the selection is corrected. Compose inputs are always included, and all running containers in the stack still stop together for consistency. Whole volumes count toward `MAX_BACKUP_GB` (10 GiB by default).
 
 ## Backup lifecycle and recovery
 

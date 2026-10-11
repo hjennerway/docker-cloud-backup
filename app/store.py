@@ -69,6 +69,7 @@ class Store:
                 CREATE TABLE IF NOT EXISTS rules (pattern TEXT PRIMARY KEY, paths TEXT NOT NULL, excludes TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS schedules (stack TEXT PRIMARY KEY, cron TEXT NOT NULL,
                     timezone TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 0, next_run TEXT);
+                CREATE TABLE IF NOT EXISTS backup_selections (stack TEXT PRIMARY KEY, selection TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, stack TEXT NOT NULL,
                     status TEXT NOT NULL, started TEXT NOT NULL, finished TEXT, detail TEXT,
                     archive TEXT, size INTEGER DEFAULT 0, sha256 TEXT, receipts TEXT DEFAULT '{}',
@@ -131,6 +132,13 @@ class Store:
     def rules(self):
         return [{**r, "paths": json.loads(r["paths"]), "excludes": json.loads(r["excludes"])}
                 for r in self.rows("SELECT * FROM rules ORDER BY pattern")]
+
+    def backup_selection(self, stack):
+        rows = self.rows("SELECT selection FROM backup_selections WHERE stack=?", (stack,))
+        return json.loads(rows[0]["selection"]) if rows else {"mode": "auto", "volumes": [], "paths": {}}
+
+    def save_backup_selection(self, stack, selection):
+        self.execute("INSERT OR REPLACE INTO backup_selections VALUES (?,?)", (stack, json.dumps(selection)))
 
     def job_update(self, job_id, **values):
         allowed = {"status", "finished", "detail", "archive", "size", "sha256", "receipts", "notification_error"}

@@ -1,6 +1,9 @@
 import fnmatch
+import hashlib
 import os
 import re
+import stat
+import time
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -44,6 +47,146 @@ class Discovery:
         self.client, self.store = client, store
         self.host_root = Path(host_root).resolve()
         self.stacks_root = stacks_root
+        self._size_cache = {}
+
+    def check_path(self, container_id, name, path):
+        """Check existence through Docker HEAD without downloading live data."""
+        try:
+            api = self.client.api
+            response = api.head(api._url('/containers/{0}/archive', container_id), params={"path": path}, timeout=30)
+            try:
+                api._raise_for_status(response)
+            finally:
+                response.close()
+        except Exception:
+            raise BackupError(f"Config path {path} is missing or not readable in {name}. Update its backup selection or image mapping.") from None
+
+    def validate_mapping(self, rule):
+        rules = [r for r in self.store.rules() if r["pattern"] != rule["pattern"]] + [rule]
+        try:
+            containers = self.client.containers.list(all=True)
+        except Exception:
+            raise BackupError("Cannot validate config paths while Docker is unavailable.") from None
+        checked = 0
+        for container in containers:
+            if match_rule(container.attrs["Config"]["Image"], rules) != rule:
+                continue
+            for path in rule["paths"]:
+                self.check_path(container.id, container.name, path)
+            checked += 1
+        return checked
+
+    def volume_size(self, source):
+        """Logical file bytes; never follow symlinks or download container data.
+
+        Bound scans and cache them so dashboard polling cannot repeatedly walk
+        large media mounts. An incomplete/unreadable scan is unknown, never zero.
+        """
+        if not source:
+            return None
+        now = time.monotonic()
+        cached = self._size_cache.get(source)
+        if cached and now - cached[0] < 60:
+            return cached[1]
+        size, count = 0, 0
+        try:
+            pending = [self.host_path(source)]
+            while pending:
+                path = pending.pop()
+                count += 1
+                if count > 100000 or time.monotonic() - now > 1:
+                    raise OSError("Size scan limit reached")
+                info = path.lstat()
+                if stat.S_ISREG(info.st_mode):
+                    size += info.st_size
+                elif stat.S_ISDIR(info.st_mode):
+                    with os.scandir(path) as entries:
+                        for entry in entries:
+                            if len(pending) + count > 100000 or time.monotonic() - now > 1:
+                                raise OSError("Size scan limit reached")
+                            pending.append(Path(entry.path))
+        except (OSError, BackupError):
+            size = None
+        if len(self._size_cache) > 1000:
+            self._size_cache.clear()
+        self._size_cache[source] = (time.monotonic(), size)
+        return size
+
+    def stack_volumes(self, stack, include_sizes=True):
+        volumes = {}
+        for container in stack["containers"]:
+            for mount in container["mounts"]:
+                if mount["type"] not in {"volume", "bind"}:
+                    continue
+                source = mount.get("source", "")
+                identity = [mount["type"], mount.get("name", ""), source]
+                if not source and not mount.get("name"):
+                    identity += [container["service"], mount["destination"]]
+                key = hashlib.sha256(repr(identity).encode()).hexdigest()
+                volume = volumes.setdefault(key, {
+                    "id": key, "name": mount.get("name") or source or mount["destination"],
+                    "type": mount["type"], "source": source, "mounts": [],
+                })
+                volume["mounts"].append({"container_id": container["id"], "container": container["name"],
+                                         "service": container["service"], "destination": mount["destination"]})
+        for volume in volumes.values():
+            volume["size_bytes"] = self.volume_size(volume["source"]) if include_sizes else None
+        return sorted(volumes.values(), key=lambda v: (v["name"], v["id"]))
+
+    def configure_stack(self, stack, selection):
+        """Resolve persisted choices against current containers, failing closed."""
+        stack["backup_selection"] = selection
+        issues = []
+        containers = {c["id"]: c for c in stack["containers"]}
+        for container in containers.values():
+            container["backup_paths"] = []
+        mode = selection["mode"]
+        if mode == "auto":
+            for container in containers.values():
+                rule = container["rule"]
+                if rule is None:
+                    issues.append(f"Choose volumes, config files or an image mapping for {container['image']}.")
+                else:
+                    container["backup_paths"] = [{"path": path, "excludes": rule["excludes"], "kind": "config"}
+                                                 for path in rule["paths"]]
+        elif mode == "manual":
+            services = {c["service"] for c in containers.values()}
+            for service in selection["paths"]:
+                if selection["paths"][service] and service not in services:
+                    issues.append(f"Selected service {service} no longer exists. Update the backup selection.")
+            if not any(selection["paths"].values()):
+                issues.append("Enter at least one config file or folder to back up.")
+            for container in containers.values():
+                container["backup_paths"] = [{"path": path, "excludes": [], "kind": "config"}
+                                             for path in dict.fromkeys(selection["paths"].get(container["service"], []))]
+        elif mode == "volumes":
+            available = {v["id"]: v for v in stack["volumes"]}
+            if not selection["volumes"]:
+                issues.append("Select at least one volume to back up.")
+            for key in dict.fromkeys(selection["volumes"]):
+                if key not in available:
+                    issues.append("A selected volume is no longer mounted. Update the backup selection.")
+                    continue
+                mount = available[key]["mounts"][0]
+                path = mount["destination"]
+                if path == "/" or PurePosixPath(path).parts[1] in {"proc", "sys", "dev"}:
+                    issues.append(f"System mount {path} cannot be backed up as a volume.")
+                    continue
+                containers[mount["container_id"]]["backup_paths"].append({
+                    "path": path, "kind": "volume", "volume_id": key,
+                    "excludes": [m["destination"][len(path) + 1:] + "/**"
+                                 for m in containers[mount["container_id"]]["mounts"]
+                                 if m["destination"].startswith(path + "/")],
+                })
+        else:
+            issues.append("Unknown backup selection mode.")
+        for container in containers.values():
+            for item in container["backup_paths"]:
+                try:
+                    self.check_path(container["id"], container["name"], item["path"])
+                except BackupError as exc:
+                    issues.append(str(exc))
+        return issues
 
     def host_path(self, path):
         p = PurePosixPath(path)
@@ -54,7 +197,7 @@ class Discovery:
             raise BackupError("Host file resolves outside the read-only host mount.")
         return target
 
-    def stacks(self):
+    def stacks(self, include_sizes=True, stack_name=None):
         try:
             containers = self.client.containers.list(all=True)
         except Exception as exc:
@@ -94,7 +237,9 @@ class Discovery:
                 "id": c.id, "name": c.name, "image": image,
                 "service": labels.get("com.docker.compose.service", c.name),
                 "state": c.status, "rule": rule,
-                "mounts": [{"type": m["Type"], "destination": m["Destination"]} for m in c.attrs.get("Mounts", [])],
+                "mounts": [{"type": m["Type"], "destination": m["Destination"],
+                            "source": m.get("Source", ""), "name": m.get("Name", "")}
+                           for m in c.attrs.get("Mounts", [])],
             })
         # Discover stacks saved in Dockge even when no containers exist.
         for root in sorted(roots):
@@ -125,6 +270,8 @@ class Discovery:
                         break
             except (OSError, BackupError):
                 continue
+        if stack_name is not None:
+            stacks = {name: stack for name, stack in stacks.items() if name == stack_name}
         schedules = {s["stack"]: s for s in self.store.rows("SELECT * FROM schedules")}
         for stack in stacks.values():
             stack["schedule"] = schedules.get(stack["name"], {"cron": "0 3 * * *", "timezone": os.getenv("TZ", "UTC"), "enabled": False, "next_run": None})
@@ -135,9 +282,8 @@ class Discovery:
                 stack["issues"].append("No Compose file found. Recreate this container as a Compose stack first.")
             if not stack["containers"]:
                 stack["issues"].append("Inactive stack: create its containers before backing up config.")
-            for c in stack["containers"]:
-                if c["rule"] is None:
-                    stack["issues"].append(f"Add a config mapping for {c['image']}.")
+            stack["volumes"] = self.stack_volumes(stack, include_sizes)
+            stack["issues"].extend(self.configure_stack(stack, self.store.backup_selection(stack["name"])))
             for file in stack["compose_files"]:
                 try:
                     if not self.host_path(file).is_file():
@@ -147,7 +293,7 @@ class Discovery:
         return sorted(stacks.values(), key=lambda s: s["name"])
 
     def get(self, name):
-        stack = next((s for s in self.stacks() if s["name"] == name), None)
+        stack = next(iter(self.stacks(include_sizes=False, stack_name=name)), None)
         if stack is None:
             raise BackupError("Stack no longer exists.")
         return stack

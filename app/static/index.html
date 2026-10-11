@@ -132,7 +132,7 @@
               <div>
                 <strong>A smaller, restorable backup</strong>
                 <p>
-                  Compose files and mapped config are archived together.
+                  Compose files and your selected config or volumes are archived together.
                   Containers are stopped for a consistent copy, then restarted
                   before upload. Images and unselected media mounts stay out.
                 </p>
@@ -337,7 +337,7 @@
             <div class="info-strip compact">
               <span class="info-icon">i</span>
               <p>
-                Unknown images need a mapping before backup. Paths are inside
+                For automatic config backups, unknown images need a mapping. You can also choose volumes or enter config paths on the Stacks page. Paths are inside
                 the container. Review broad folders such as
                 <code>/data</code> to avoid backing up media. Tags are ignored
                 when matching.

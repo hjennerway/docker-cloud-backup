@@ -16,7 +16,8 @@ from app.store import Store
 
 @pytest.mark.integration
 @pytest.mark.skipif(os.getenv("RUN_DOCKER_TESTS") != "1", reason="Set RUN_DOCKER_TESTS=1 after building the app image")
-def test_real_named_volume_backup_restart_and_restore(tmp_path):
+@pytest.mark.parametrize("mode", ["auto", "volumes", "manual"])
+def test_real_named_volume_backup_restart_and_restore(tmp_path, mode):
     client = docker.from_env(timeout=120)
     project = "cloud-backup-test-" + uuid.uuid4().hex[:8]
     created, volumes = [], []
@@ -32,7 +33,8 @@ def test_real_named_volume_backup_restart_and_restore(tmp_path):
         for name in ("active", "stopped"):
             volume = client.volumes.create(name=project + "-" + name)
             volumes.append(volume)
-            container = client.containers.create("docker-cloud-backup:local", ["python", "-c", "import time; time.sleep(3600)"],
+            container = client.containers.create("docker-cloud-backup:local", ["python", "-c",
+                "import signal, sys, time; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); time.sleep(3600)"],
                 name=project + "-" + name,
                 labels={"com.docker.compose.project": project, "com.docker.compose.service": name,
                         "com.docker.compose.project.working_dir": "/stacks/" + project,
@@ -53,6 +55,13 @@ def test_real_named_volume_backup_restart_and_restore(tmp_path):
         discovery = Discovery(client, store, root, "/stacks")
         stack = discovery.get(project)
         assert not stack["issues"]
+        if mode == "volumes":
+            assert len(stack["volumes"]) == 2
+            store.save_backup_selection(project, {"mode": mode, "volumes": [v["id"] for v in stack["volumes"]], "paths": {}})
+        elif mode == "manual":
+            store.save_backup_selection(project, {"mode": mode, "volumes": [], "paths": {name: ["/config/settings.json"] for name in ("active", "stopped")}})
+        if mode != "auto":
+            store.execute("DELETE FROM rules WHERE pattern='library/docker-cloud-backup'")
         engine = BackupEngine(store, discovery, Destinations(store))
         store.execute("INSERT INTO jobs (id,stack,status,started) VALUES ('real',?,'queued',?)", (project, utcnow().isoformat()))
         engine.run("real", project)
@@ -64,7 +73,8 @@ def test_real_named_volume_backup_restart_and_restore(tmp_path):
         assert created[1].status == "created"
         with tarfile.open(engine.archive_dir / job["archive"]) as archive:
             names = archive.getnames()
-            assert not any("skip.txt" in name for name in names)
+            assert any("cache/skip.txt" in name for name in names) == (mode == "volumes")
+            assert not any("media/skip.txt" in name for name in names)
             assert "manifest.json" in names
             paths = [name for name in names if name.endswith("settings.json")]
             assert len(paths) == 2

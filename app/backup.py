@@ -82,7 +82,7 @@ def append_archive(output, chunks, prefix, excludes, budget, cancelled):
                 continue  # Never include sockets, devices or FIFOs.
             budget[0] -= member.size
             if budget[0] < 0:
-                raise BackupError("Config exceeds MAX_BACKUP_GB. Narrow the mapping or raise the limit.")
+                raise BackupError("Selected data exceeds MAX_BACKUP_GB. Select fewer volumes or narrower config paths, or raise the limit.")
             source_file = source.extractfile(member) if member.isfile() else None
             member.name = prefix + "/" + str(name)
             # Preserve permissions, owner IDs and symlinks, but no extended path
@@ -204,24 +204,16 @@ class BackupEngine:
                 c.reload()
                 if c.status not in {"running", "exited", "created"}:
                     raise BackupError(f"{item['name']} is {c.status}; wait for a stable state before backup.")
-                for path in item["rule"]["paths"]:
-                    try:
-                        api = self.discovery.client.api
-                        # Docker's HEAD archive endpoint checks the path without
-                        # reading live config or opening a tar stream.
-                        response = api.head(api._url('/containers/{0}/archive', c.id), params={"path": path}, timeout=30)
-                        try:
-                            api._raise_for_status(response)
-                        finally:
-                            response.close()
-                    except Exception:
-                        raise BackupError(f"Config path {path} is not readable in {item['name']}. Update its image mapping.") from None
+                for path in item["backup_paths"]:
+                    self.discovery.check_path(c.id, item["name"], path["path"])
                 selected.append((item, c, c.status == "running"))
             if shutil.disk_usage(self.archive_dir).free < 256 * 1024 * 1024:
                 raise BackupError("Less than 256 MiB free in the backup data volume.")
             manifest = {"format_version": 1, "stack": name, "created": utcnow().isoformat(),
                         "compose_files": compose_files, "working_dir": stack["working_dir"], "containers": [],
-                        "notes": ["Config and application state only. Images and unselected mounts are excluded.",
+                        "backup_selection": stack["backup_selection"],
+                        "volumes": [v for v in stack["volumes"] if v["id"] in stack["backup_selection"]["volumes"]],
+                        "notes": ["Selected config paths or volumes. Image layers are excluded.",
                                   "Compose and config may contain credentials. Protect this archive."]}
             restart_errors = []
             try:
@@ -244,20 +236,22 @@ class BackupEngine:
                         archive.add(host_file, arcname="compose/" + file.lstrip("/"), recursive=False)
                     for item, c, was_running in selected:
                         entry = {"name": item["name"], "service": item["service"], "image": item["image"],
-                                 "was_running": was_running, "mounts": item["mounts"], "paths": [], "excludes": item["rule"]["excludes"]}
-                        for index, path in enumerate(item["rule"]["paths"]):
+                                 "was_running": was_running, "mounts": item["mounts"], "paths": [],
+                                 "excludes": item["rule"]["excludes"] if stack["backup_selection"]["mode"] == "auto" and item["rule"] else []}
+                        for index, source in enumerate(item["backup_paths"]):
+                            path = source["path"]
                             self.store.job_update(job_id, detail=f"Archiving {item['name']}: {path}")
                             chunks, stat = c.get_archive(path, chunk_size=1024 * 1024)
                             prefix = "containers/" + stack_key(item["name"]) + "/" + str(index)
                             try:
-                                count = append_archive(archive, chunks, prefix, item["rule"]["excludes"], budget, self.cancelled)
+                                count = append_archive(archive, chunks, prefix, source["excludes"], budget, self.cancelled)
                             finally:
                                 close = getattr(chunks, "close", None)
                                 if close:
                                     close()
                             if not count:
                                 raise BackupError(f"Config path {path} produced an empty archive.")
-                            entry["paths"].append({"source": path, "archive_prefix": prefix, "entries": count})
+                            entry["paths"].append({**source, "source": path, "archive_prefix": prefix, "entries": count})
                         manifest["containers"].append(entry)
                     data = json.dumps(manifest, indent=2).encode()
                     member = tarfile.TarInfo("manifest.json")

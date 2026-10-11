@@ -62,7 +62,8 @@ function date(value, timezone) {
   }).format(new Date(value));
 }
 function size(bytes) {
-  if (!bytes) return "—";
+  if (bytes == null) return "Size unavailable";
+  if (bytes === 0) return "0 B";
   const units = ["B", "KiB", "MiB", "GiB"];
   const n = Math.min(3, Math.floor(Math.log(bytes) / Math.log(1024)));
   return (bytes / 1024 ** n).toFixed(n ? 1 : 0) + " " + units[n];
@@ -187,7 +188,7 @@ function renderStacks() {
     return;
   }
   $("stacks-list").innerHTML =
-    `<div class="table-head"><span>STACK</span><span>CONFIG COVERAGE</span><span>BACKUP SCHEDULE</span><span></span></div>` +
+    `<div class="table-head"><span>STACK</span><span>BACKUP CONTENTS</span><span>VOLUMES</span><span>BACKUP SCHEDULE</span><span></span></div>` +
     stacks
       .map((s) => {
         const ready = !s.issues.length;
@@ -197,9 +198,11 @@ function renderStacks() {
         const coverage = s.excluded
           ? '<span class="badge neutral">Excluded</span>'
           : ready
-            ? '<span class="badge good">✓ Config mapped</span>'
+            ? '<span class="badge good">✓ Ready to back up</span>'
             : '<span class="badge warn">Needs review</span>';
-        return `<article class="stack-row"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div><div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
+        const mode = { auto: "Automatic mappings", volumes: "Selected volumes", manual: "Manual config paths" }[s.backup_selection.mode];
+        const volumes = s.volumes.map((v) => `<li><strong>${esc(v.name)}</strong><small>${v.type === "bind" ? "Bind mount" : "Named volume"} · ${size(v.size_bytes)}${s.backup_selection.mode === "volumes" && s.backup_selection.volumes.includes(v.id) ? " · Included" : ""}</small></li>`).join("");
+        return `<article class="stack-row"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small>${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div><div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
       })
       .join("");
 }
@@ -349,8 +352,45 @@ function reviewDialog(name) {
   const s = getStack(name);
   openModal(
     "BACKUP CONTENTS",
-    `<h2>${esc(name)}</h2><p>Running containers in this stack will stop together, then restart before the archive is uploaded. Already stopped containers stay stopped.</p>${s.issues.length ? `<ul class="issue-list">${s.issues.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}<p><strong>Compose files</strong><br>${s.compose_files.map(esc).join("<br>") || "Not found"}</p><ul class="backup-items">${s.containers.map((c) => `<li><strong>${esc(c.name)}</strong> <span class="badge neutral">${esc(c.state)}</span><small>${esc(c.image)}</small><small>${c.rule ? (c.rule.paths.length ? c.rule.paths.map((p) => `<code>${esc(p)}</code>`).join(" ") : "Compose only · stateless") : `<button class="text-button" data-action="map-image" data-image="${esc(c.image)}">+ Add config mapping</button>`}</small>${c.rule?.excludes.length ? `<small>Excluded: ${esc(c.rule.excludes.join(", "))}</small>` : ""}<small>Mounted paths: ${esc(c.mounts.map((m) => m.destination).join(", ") || "None")}</small></li>`).join("")}</ul><div class="actions"><button class="primary" data-action="backup" data-name="${esc(name)}" ${s.issues.length || state.busy ? "disabled" : ""}>Stop, back up & restart</button><button class="secondary" data-action="close">Close</button></div>`,
+    `<h2>${esc(name)}</h2><p>Running containers in this stack will stop together, then restart before the archive is uploaded. Already stopped containers stay stopped.</p>${s.issues.length ? `<ul class="issue-list">${s.issues.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}<button class="secondary" data-action="selection" data-name="${esc(name)}" ${s.excluded ? "disabled" : ""}>Choose backup contents</button><p><strong>Compose files</strong><br>${s.compose_files.map(esc).join("<br>") || "Not found"}</p><ul class="backup-items">${s.containers.map((c) => `<li><strong>${esc(c.name)}</strong> <span class="badge neutral">${esc(c.state)}</span><small>${esc(c.image)}</small><small>${c.backup_paths.length ? c.backup_paths.map((p) => `<code>${esc(p.path)}</code>${p.kind === "volume" ? " (volume)" : ""}${p.excludes.length ? ` · Excluded: ${esc(p.excludes.join(", "))}` : ""}`).join("<br>") : s.backup_selection.mode === "auto" && !c.rule ? `<button class="text-button" data-action="map-image" data-image="${esc(c.image)}">+ Add config mapping</button>` : "No additional paths selected"}</small><small>Mounted paths: ${esc(c.mounts.map((m) => m.destination).join(", ") || "None")}</small></li>`).join("")}</ul><div class="actions"><button class="primary" data-action="backup" data-name="${esc(name)}" ${s.issues.length || state.busy ? "disabled" : ""}>Stop, back up & restart</button><button class="secondary" data-action="close">Close</button></div>`,
   );
+}
+function selectionDialog(name) {
+  const s = getStack(name), selection = s.backup_selection;
+  const services = [...new Set(s.containers.map((c) => c.service))];
+  closeModal();
+  openModal(
+    "CHOOSE BACKUP CONTENTS",
+    `<h2>${esc(name)}</h2><p>Compose files are always included. These choices apply to manual and scheduled backups.</p><form id="selection-form"><label>Back up<select id="selection-mode"><option value="auto">Automatically matched config paths</option><option value="volumes">One or more volumes</option><option value="manual">Manually specified config files or folders</option></select></label><div id="selection-auto"><p class="hint">Use each image's config mapping. Every mapped path is checked in its container.</p><ul class="backup-items">${s.containers.map((c) => `<li><strong>${esc(c.name)}</strong><small>${c.rule ? esc(c.rule.paths.join(", ") || "Compose only · stateless") : "No matching image mapping"}</small>${c.rule ? `<button type="button" class="text-button" data-action="edit-rule" data-pattern="${esc(c.rule.pattern)}">Edit image mapping</button>` : `<button type="button" class="text-button" data-action="map-image" data-image="${esc(c.image)}">Add image mapping</button>`}</li>`).join("")}</ul></div><div id="selection-volumes"><p class="hint">Include the complete contents of each selected volume or bind mount. Image mapping exclusions do not apply. Shared volumes are copied once; nested mounts are included only when selected separately.</p>${s.volumes.map((v) => `<label class="check volume-choice"><input type="checkbox" name="volume" value="${esc(v.id)}" ${selection.volumes.includes(v.id) ? "checked" : ""}><span><strong>${esc(v.name)}</strong><small>${v.type === "bind" ? "Bind mount" : "Named volume"} · ${size(v.size_bytes)}</small><small>${v.mounts.map((m) => `${esc(m.service)}: ${esc(m.destination)}`).join("<br>")}</small></span></label>`).join("") || '<p class="hint">No mounted volumes available. Create the stack’s containers first.</p>'}<p class="hint">Sizes are uncompressed file totals, refreshed about once a minute. Unreadable or very large folders show “Size unavailable”; they can still be selected.</p></div><div id="selection-manual"><p class="hint">Enter absolute paths inside each service’s container, one per line. Leave a service blank to skip its config. Paths are checked before saving.</p>${services.map((service, i) => `<label>${esc(service)}<textarea id="selection-paths-${i}" rows="3" placeholder="/config/settings.yaml" spellcheck="false">${esc((selection.paths[service] || []).join("\n"))}</textarea></label>`).join("")}</div><p id="selection-error" class="error" role="alert"></p><div class="actions"><button class="primary" ${!s.containers.length || s.excluded ? "disabled" : ""}>Save backup contents</button><button type="button" class="secondary" data-action="close">Cancel</button></div></form>`,
+  );
+  $("selection-mode").value = selection.mode;
+  const updateMode = () => {
+    for (const mode of ["auto", "volumes", "manual"])
+      $("selection-" + mode).classList.toggle("hidden", $("selection-mode").value !== mode);
+    $("selection-error").textContent = "";
+  };
+  $("selection-mode").onchange = updateMode;
+  updateMode();
+  $("selection-form").onsubmit = async (event) => {
+    event.preventDefault();
+    const button = event.submitter;
+    button.disabled = true;
+    try {
+      const mode = $("selection-mode").value;
+      const paths = Object.fromEntries(services.map((service, i) => [service, $("selection-paths-" + i).value.split("\n").map((p) => p.trim()).filter(Boolean)]));
+      await api(`/stacks/${encodeURIComponent(name)}/selection`, "PUT", {
+        mode,
+        volumes: mode === "volumes" ? [...document.querySelectorAll('input[name="volume"]:checked')].map((el) => el.value) : [],
+        paths: mode === "manual" ? paths : {},
+      });
+      closeModal();
+      toast("Backup contents saved and paths checked.");
+      await refresh();
+    } catch (error) {
+      if ($("selection-error")) $("selection-error").textContent = error.message;
+      button.disabled = false;
+    }
+  };
 }
 function ruleDialog(pattern = "", image = "") {
   let rule = state.rules.find((r) => r.pattern === pattern) || {
@@ -362,10 +402,13 @@ function ruleDialog(pattern = "", image = "") {
     rule.pattern = "library/" + rule.pattern;
   openModal(
     "IMAGE CONFIG MAPPING",
-    `<h2>${pattern ? "Edit mapping" : "Add a mapping"}</h2><p>Include only config and required application state. Do not include media, downloads or system directories.</p><form id="rule-form"><label>Image repository / pattern<input id="rule-pattern" value="${esc(rule.pattern)}" placeholder="lscr.io/linuxserver/sonarr" ${pattern ? "readonly" : ""} required></label><label>Config paths · one per line<textarea id="rule-paths" rows="4" placeholder="/config" spellcheck="false">${esc(rule.paths.join("\n"))}</textarea></label><label>Exclude patterns · one per line<textarea id="rule-excludes" rows="3" placeholder="logs/**&#10;cache/**" spellcheck="false">${esc(rule.excludes.join("\n"))}</textarea></label><p class="hint">Exclusions are relative to each selected config folder. Use an empty path list only for an intentionally stateless image. More specific image patterns win.</p><label class="check"><input id="stateless-confirm" type="checkbox" ${!rule.paths.length && pattern ? "checked" : ""}>This image has no config files (Compose only)</label><div class="actions"><button class="primary">Save mapping</button><button type="button" class="secondary" data-action="close">Cancel</button></div></form>`,
+    `<h2>${pattern ? "Edit mapping" : "Add a mapping"}</h2><p>Include only config and required application state. Do not include media, downloads or system directories.</p><form id="rule-form"><label>Image repository / pattern<input id="rule-pattern" value="${esc(rule.pattern)}" placeholder="lscr.io/linuxserver/sonarr" ${pattern ? "readonly" : ""} required></label><label>Config paths · one per line<textarea id="rule-paths" rows="4" placeholder="/config" spellcheck="false">${esc(rule.paths.join("\n"))}</textarea></label><label>Exclude patterns · one per line<textarea id="rule-excludes" rows="3" placeholder="logs/**&#10;cache/**" spellcheck="false">${esc(rule.excludes.join("\n"))}</textarea></label><p class="hint">Exclusions are relative to each selected config folder. Use an empty path list only for an intentionally stateless image. More specific image patterns win.</p><label class="check"><input id="stateless-confirm" type="checkbox" ${!rule.paths.length && pattern ? "checked" : ""}>This image has no config files (Compose only)</label><p id="rule-error" class="error" role="alert"></p><div class="actions"><button class="primary">Save mapping</button><button type="button" class="secondary" data-action="close">Cancel</button></div></form>`,
   );
   $("rule-form").onsubmit = async (e) => {
     e.preventDefault();
+    const button = e.submitter;
+    button.disabled = true;
+    $("rule-error").textContent = "";
     try {
       const lines = (id) =>
         $(id)
@@ -377,16 +420,19 @@ function ruleDialog(pattern = "", image = "") {
         throw new Error(
           "Add a config path or explicitly mark the image as stateless.",
         );
-      await api("/rules", "PUT", {
+      const result = await api("/rules", "PUT", {
         pattern: $("rule-pattern").value.trim(),
         paths,
         excludes: lines("rule-excludes"),
       });
       closeModal();
-      toast("Image mapping saved.");
+      toast(result.checked_containers ? "Image mapping saved and paths checked." : "Mapping saved. No matching containers exist yet; paths will be checked when discovered.");
       await refresh();
     } catch (e) {
-      toast(e.message, true);
+      if ($("rule-error") && $("modal").open) $("rule-error").textContent = e.message;
+      else toast(e.message, true);
+    } finally {
+      button.disabled = false;
     }
   };
 }
@@ -423,7 +469,11 @@ document.addEventListener("click", async (e) => {
       case "review":
         reviewDialog(b.dataset.name);
         break;
+      case "selection":
+        selectionDialog(b.dataset.name);
+        break;
       case "edit-rule":
+        closeModal();
         ruleDialog(b.dataset.pattern);
         break;
       case "map-image":
