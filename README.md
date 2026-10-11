@@ -2,6 +2,12 @@
 
 A single small container for backing up Docker **configuration and application state**, with a web UI, per-stack schedules, SMB uploads, Google Drive mirroring and push notifications. No image exports, Docker-in-Docker, NAS mounts, Node build step or external database.
 
+# Screenshots
+![7d/30d scheduled view](/screenshots/cloud-backup1.png "7d/30d scheduled view")
+![Backup activity](/screenshots/cloud-backup2.png "Backup activity")
+![Dashboard](/screenshots/cloud-backup3.png "Dashboard")
+
+
 ## Start
 
 ```sh
