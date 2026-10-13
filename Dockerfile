@@ -6,6 +6,7 @@ COPY --from=rclone /usr/local/bin/rclone /usr/local/bin/rclone
 COPY requirements.txt requirements.lock ./
 RUN pip install --no-cache-dir -r requirements.txt
 COPY app ./app
+COPY LICENSE ./LICENSE
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=3)" || exit 1
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1", "--no-access-log"]

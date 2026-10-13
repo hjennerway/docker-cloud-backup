@@ -2,10 +2,10 @@
 
 A single small container for backing up Docker **configuration and application state**, with a web UI, per-stack schedules, SMB uploads, Google Drive mirroring and push notifications. No image exports, Docker-in-Docker, NAS mounts, Node build step or external database.
 
-# Screenshots
-![7d/30d scheduled view](/screenshots/cloud-backup1.png "7d/30d scheduled view")
-![Backup activity](/screenshots/cloud-backup2.png "Backup activity")
+## Screenshots
 ![Dashboard](/screenshots/cloud-backup3.png "Dashboard")
+![Backup activity](/screenshots/cloud-backup2.png "Backup activity")
+![7d/30d scheduled view](/screenshots/cloud-backup1.png "7d/30d scheduled view")
 
 
 ## Start
@@ -208,3 +208,7 @@ RUN_DOCKER_TESTS=1 pytest -q
 On PowerShell, activate with `.venv\Scripts\Activate.ps1` and set `$env:RUN_DOCKER_TESTS='1'`. Integration tests create and clean up only uniquely named disposable test containers and volumes. They verify named-volume content, media/cache exclusion, stopped-container preservation, restart and restoration into a clean container. Unit tests cover restart failures, lost stop responses, recovery locking, path preflight, archive traversal/size limits, encrypted settings, cron, authentication, CSRF and retention isolation.
 
 The runtime is Python/FastAPI + SQLite + a single rclone binary, with vanilla HTML/CSS/JavaScript. See the [Docker archive API](https://docs.docker.com/reference/api/engine/), [rclone SMB](https://rclone.org/smb/), [rclone Drive](https://rclone.org/drive/) and [Google web OAuth](https://developers.google.com/identity/protocols/oauth2/web-server) documentation for the integration contracts.
+
+## License
+
+Docker Cloud Backup is licensed under the [GNU General Public License, version 3](LICENSE) (`GPL-3.0-only`).
