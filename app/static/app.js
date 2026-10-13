@@ -106,6 +106,7 @@ function badge(status) {
   return `<span class="badge ${colors[status] || "neutral"}">${esc(status.charAt(0).toUpperCase() + status.slice(1))}</span>`;
 }
 function showLogin() {
+  if ($("modal").open) closeModal();
   $("shell").classList.add("hidden");
   $("login").classList.remove("hidden");
   state = null;
@@ -422,14 +423,19 @@ function renderStacks() {
     latest = state.jobs[0],
     destinations =
       Number(state.settings.smb_enabled) + Number(state.settings.drive_enabled);
-  const metric = (title, value, note, icon) =>
-    `<article class="metric"><div class="metric-top"><span>${title}</span><span>${icon}</span></div><strong>${value}</strong><small>${note}</small></article>`;
+  const metric = (title, value, note, icon, target) => {
+    const content = `<div class="metric-top"><span>${title}</span><span aria-hidden="true">${icon}</span></div><strong>${value}</strong><small>${note}</small>`;
+    return target
+      ? `<a class="metric metric-link" href="#${target}">${content}</a>`
+      : `<article class="metric">${content}</article>`;
+  };
   $("metrics").innerHTML =
     metric(
       "Discovered stacks",
       state.stacks.length,
       "On this Docker host",
       "▦",
+      "stacks",
     ) +
     metric(
       "Scheduled backups",
@@ -438,6 +444,7 @@ function renderStacks() {
         ? "<em>Schedules enabled</em>"
         : "Choose a schedule to get started",
       "◷",
+      "scheduled",
     ) +
     metric(
       "Remote destinations",
@@ -446,6 +453,7 @@ function renderStacks() {
         ? "Local copy always included"
         : "Local backups are available",
       "↗",
+      "destinations",
     ) +
     metric(
       "Latest backup",
@@ -561,6 +569,45 @@ function openModal(eyebrow, html) {
 }
 function closeModal() {
   $("modal").close();
+}
+function passwordDialog() {
+  openModal(
+    "ACCOUNT SECURITY",
+    `<h2>Change password</h2><p>Choose a new admin password. You will stay signed in here; other browsers will need to sign in again.</p><form id="password-form"><label>Current password<input id="current-password" type="password" autocomplete="current-password" maxlength="1024" required></label><label>New password<input id="new-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" aria-describedby="password-hint" required></label><p id="password-hint" class="hint">Use at least 12 characters.</p><label>Confirm new password<input id="confirm-password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required></label><p id="password-error" class="error" role="alert"></p><div class="actions"><button class="primary">Save password</button><button type="button" class="secondary" data-action="close">Cancel</button></div></form>`,
+  );
+  const form = $("password-form"), error = $("password-error");
+  form.onsubmit = async (e) => {
+    e.preventDefault();
+    error.textContent = "";
+    const current = $("current-password").value,
+      password = $("new-password").value,
+      confirmation = $("confirm-password").value;
+    if (password !== confirmation) {
+      error.textContent = "New passwords do not match.";
+      return;
+    }
+    if (current === password) {
+      error.textContent = "Choose a different new password.";
+      return;
+    }
+    const button = e.submitter;
+    button.disabled = true;
+    try {
+      await api("/password", "POST", {
+        current_password: current,
+        new_password: password,
+        confirm_password: confirmation,
+      });
+      form.reset();
+      if (form.isConnected) closeModal();
+      toast("Password changed. Use your new password next time you sign in.");
+    } catch (e) {
+      if (form.isConnected && $("modal").open) error.textContent = e.message;
+      else toast(e.message, true);
+    } finally {
+      button.disabled = false;
+    }
+  };
 }
 function scheduleDialog(name) {
   const s = getStack(name),
@@ -843,6 +890,10 @@ $("logout").onclick = async () => {
     toast(e.message, true);
   }
 };
+$("change-password").onclick = passwordDialog;
+$("modal").addEventListener("close", () => {
+  $("password-form")?.reset();
+});
 $("refresh").onclick = () =>
   refresh()
     .then(() => toast("Stack discovery refreshed."))

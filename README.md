@@ -21,6 +21,8 @@ docker compose exec cloud-backup cat /data/admin-password.txt
 
 Open `http://YOUR_DOCKER_HOST:8088` and sign in. The generated password file exists only when `ADMIN_PASSWORD` is unset. Keep `.env` out of version control. All schedules start **paused**; discovery never stops a container by itself.
 
+After signing in, use **Change password** in the top bar. Enter the current password and confirm a new one of at least 12 characters. The app stores a salted password hash in the data volume, so the change survives restarts. `ADMIN_PASSWORD` supplies the initial password only; once credentials have been saved, changing that environment variable does not reset them. A successful password change removes the generated `admin-password.txt` file and signs out other browsers; your current browser stays signed in.
+
 1. Review discovered stacks and choose automatic config mappings, selected volumes or manual config paths.
 2. Configure and test the SMB destination, and optionally Google Drive.
 3. Run a manual backup and check Activity. Download and test restoring a small archive.

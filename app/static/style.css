@@ -311,6 +311,15 @@ main {
   background: #fff;
   padding: 22px;
 }
+.metric-link {
+  color: var(--ink);
+  transition: border-color 0.15s, background 0.15s;
+}
+.metric-link:hover,
+.metric-link:focus-visible {
+  border-color: var(--teal);
+  background: #f0f6f4;
+}
 .metric-top {
   display: flex;
   align-items: center;
@@ -1340,6 +1349,12 @@ dialog::backdrop {
     padding: 0 20px;
   }
   .private-label {
+    display: none;
+  }
+  .topbar-right {
+    gap: 12px;
+  }
+  .topbar-right .avatar {
     display: none;
   }
   .content {

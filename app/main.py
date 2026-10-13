@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field, StrictBool
 from starlette.concurrency import run_in_threadpool
 
 from .backup import BackupEngine, next_run, utcnow
+from .auth import Credentials
 from .destinations import Destinations, notify, validate_settings
 from .discovery import BackupError, Discovery, validate_rule
 from .store import DEFAULTS, SECRETS, Store
@@ -31,6 +32,12 @@ from .scheduled import scheduled_jobs
 
 class Login(BaseModel):
     password: str = Field(max_length=1024)
+
+
+class PasswordChange(BaseModel):
+    current_password: str = Field(max_length=1024)
+    new_password: str = Field(min_length=12, max_length=1024)
+    confirm_password: str = Field(max_length=1024)
 
 
 class Schedule(BaseModel):
@@ -69,14 +76,7 @@ class RestoreSelection(BaseModel):
 def create_app(store=None, client=None, start_worker=True):
     store = store or Store(os.getenv("DATA_DIR", "/data"))
     serializer = URLSafeTimedSerializer(store.cipher._signing_key, salt="cloud-backup-session-v1")
-    password = os.getenv("ADMIN_PASSWORD", "")
-    if not password:
-        password_file = store.root / "admin-password.txt"
-        if not password_file.exists():
-            password_file.write_text(secrets.token_urlsafe(24))
-            password_file.chmod(0o600)
-        password = password_file.read_text().strip()
-    password_digest = hashlib.sha256(password.encode()).digest()
+    credentials = Credentials(store)
     attempts, attempt_lock = {}, threading.Lock()
 
     app = FastAPI(title="Docker Cloud Backup", docs_url=None, redoc_url=None, openapi_url=None)
@@ -129,7 +129,7 @@ def create_app(store=None, client=None, start_worker=True):
     def session(request):
         try:
             data = serializer.loads(request.cookies.get("session", ""), max_age=43200)
-            if not hmac.compare_digest(data.get("auth", ""), password_digest.hex()):
+            if not hmac.compare_digest(data.get("auth", ""), credentials.session_version()):
                 return None
             return data
         except (BadSignature, ValueError):
@@ -170,22 +170,42 @@ def create_app(store=None, client=None, start_worker=True):
     def current_session(request: Request):
         return {"authenticated": bool(session(request))}
 
-    @app.post("/api/login")
-    def login(body: Login, request: Request):
+    def check_password(request, verify, error_status=401):
         address = request.client.host if request.client else "unknown"
         with attempt_lock:
             now = time.monotonic()
             failures = [t for t in attempts.get(address, []) if now - t < 300]
             if len(failures) >= 10:
                 raise HTTPException(429, "Too many attempts. Try again in five minutes.")
-            if not hmac.compare_digest(hashlib.sha256(body.password.encode()).digest(), password_digest):
+            version = verify()
+            if version is None:
                 attempts[address] = failures + [now]
-                raise HTTPException(401, "Incorrect password.")
+                raise HTTPException(error_status, "Incorrect password.")
             attempts.pop(address, None)
+            return version
+
+    def signed_in_response(version, session_id=None):
         response = JSONResponse({"ok": True})
-        response.set_cookie("session", serializer.dumps({"auth": password_digest.hex(), "id": secrets.token_hex(16)}),
+        response.set_cookie("session", serializer.dumps({"auth": version, "id": session_id or secrets.token_hex(16)}),
                             httponly=True, samesite="lax", secure=os.getenv("COOKIE_SECURE", "false").lower() == "true", max_age=43200)
         return response
+
+    @app.post("/api/login")
+    def login(body: Login, request: Request):
+        return signed_in_response(check_password(request, lambda: credentials.authenticate(body.password)))
+
+    @app.post("/api/password")
+    def change_password(body: PasswordChange, request: Request):
+        user = session(request)
+        if not user:
+            raise HTTPException(401, "Sign in to continue.")
+        if body.new_password != body.confirm_password:
+            raise HTTPException(400, "New passwords do not match.")
+        if body.current_password == body.new_password:
+            raise HTTPException(400, "Choose a different new password.")
+        version = check_password(request, lambda: credentials.change(
+            body.current_password, body.new_password, user["auth"]), error_status=400)
+        return signed_in_response(version, user["id"])
 
     @app.post("/api/logout")
     def logout():
