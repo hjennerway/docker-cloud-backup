@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const vm = require("node:vm");
 
-function workspace(host = "nas") {
+function workspace(host = "nas", savedView = "selected", navigation = null) {
   const elements = new Map();
   const element = (id) => {
     if (!elements.has(id)) elements.set(id, {
@@ -13,7 +13,7 @@ function workspace(host = "nas") {
     });
     return elements.get(id);
   };
-  const stored = new Map([["docker-host", host]]);
+  const stored = new Map([["docker-host", host], ["stack-host-view", savedView], ["stack-host-navigation", navigation]]);
   let reloads = 0;
   const context = vm.createContext({
     document: { getElementById: element, addEventListener() {} },
@@ -43,7 +43,7 @@ test("host selection routes workspace APIs but keeps portal authentication local
 
 test("all-host stacks share one list with host badges, duplicate names and offline hosts", () => {
   const ui = workspace();
-  const stack = { name: "same-stack", containers: [{ name: "app", state: "running" }], issues: [], schedule: { enabled: false } };
+  const stack = { name: "same-stack", containers: [{ name: "app", state: "running" }], issues: [], volumes: [], backup_selection: { mode: "auto", volumes: [] }, schedule: { enabled: false } };
   const overview = { hosts: [
     { id: "local", name: "Local Docker host", stacks: [stack], error: null },
     { id: "nas", name: "NAS", stacks: [stack], error: null },
@@ -51,9 +51,11 @@ test("all-host stacks share one list with host badges, duplicate names and offli
   ] };
   ui.run(`state = {}; stackOverview = ${JSON.stringify(overview)}; renderStacks();`);
   const html = ui.element("stacks-list").innerHTML;
-  assert.equal((html.match(/<h3>same-stack<\/h3>/g) || []).length, 2);
+  assert.equal((html.match(/<strong>same-stack<\/strong>/g) || []).length, 2);
   assert.match(html, /<span class="badge neutral">local<\/span>/);
   assert.doesNotMatch(html, /host-stack-group/);
+  for (const column of ["STACK", "BACKUP CONTENTS", "VOLUMES", "BACKUP SCHEDULE", "MANUAL BACKUP"]) assert.ok(html.includes(`<span>${column}</span>`));
+  assert.match(html, /class="stack-row/);
   assert.match(html, /NAS/);
   assert.match(html, /Cannot reach the remote host/);
   assert.match(html, /data-id="local"/);
@@ -64,26 +66,26 @@ test("all-host stacks share one list with host badges, duplicate names and offli
   assert.match(ui.element("stacks-list").innerHTML, /NAS/);
   ui.element("stack-search").value = "nas";
   ui.run("renderStackOverview()");
-  assert.equal((ui.element("stacks-list").innerHTML.match(/<h3>same-stack<\/h3>/g) || []).length, 1);
+  assert.equal((ui.element("stacks-list").innerHTML.match(/<strong>same-stack<\/strong>/g) || []).length, 1);
 });
 
 test("unified stacks sort across hosts and retain the host for duplicate names", () => {
   const ui = workspace();
-  const stack = (name) => ({ name, containers: [], issues: [], schedule: { enabled: false } });
+  const stack = (name) => ({ name, containers: [], issues: [], volumes: [], backup_selection: { mode: "auto", volumes: [] }, schedule: { enabled: false } });
   const overview = { hosts: [
     { id: "nas", name: "NAS", stacks: [stack("Zulu"), stack("alpha"), stack("Same")] },
     { id: "local", name: "Local Docker host", stacks: [stack("beta"), stack("Same")] },
   ] };
   ui.run(`stackOverview = ${JSON.stringify(overview)}; renderStackOverview();`);
   const html = ui.element("stacks-list").innerHTML;
-  assert.deepEqual([...html.matchAll(/<h3>(.*?)<\/h3>/g)].map((match) => match[1]),
+  assert.deepEqual([...html.matchAll(/<strong>(.*?)<\/strong>/g)].map((match) => match[1]),
     ["alpha", "beta", "Same", "Same", "Zulu"]);
   assert.deepEqual([...html.matchAll(/data-id="([^"]+)" data-name="Same"/g)].map((match) => match[1]),
-    ["local", "nas"]);
+    ["local", "local", "local", "nas", "nas", "nas"]);
   ui.element("stack-search").value = "local";
   ui.run("renderStackOverview()");
   assert.doesNotMatch(ui.element("stacks-list").innerHTML, /data-id="nas"/);
-  assert.match(ui.element("stacks-list").innerHTML, /<h3>beta<\/h3>/);
+  assert.match(ui.element("stacks-list").innerHTML, /<strong>beta<\/strong>/);
 });
 
 test("downloads remain bound to their host", () => {
@@ -107,4 +109,11 @@ test("switching reloads the workspace and cannot interrupt an action or dialog",
   selector.onchange({ target: selector });
   assert.equal(ui.stored.get("docker-host"), "local");
   assert.equal(ui.reloads(), 1);
+});
+
+test("all hosts is the default even after a previous selected-host view", () => {
+  assert.equal(workspace().run("stackHostView"), "all");
+  const navigation = workspace("nas", "selected", "selected");
+  assert.equal(navigation.run("stackHostView"), "selected");
+  assert.equal(navigation.stored.has("stack-host-navigation"), false);
 });
