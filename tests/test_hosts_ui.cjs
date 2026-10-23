@@ -62,6 +62,11 @@ test("all-host stacks share one list with host badges, duplicate names and offli
   assert.match(html, /data-id="nas"/);
   assert.equal(ui.element("stack-total").textContent, 2);
   assert.equal(ui.element("backup-selected").disabled, true);
+  assert.equal(ui.element("backup-selected").hidden, true);
+  assert.match(ui.element("manual-backup-hint").textContent, /managed separately on each host/);
+  assert.match(html, /Saved manual backup selection/);
+  assert.match(html, />Open host<\/button>/);
+  assert.doesNotMatch(html, /role="switch"/);
   ui.run("state = null; renderStacks();");
   assert.match(ui.element("stacks-list").innerHTML, /NAS/);
   ui.element("stack-search").value = "nas";

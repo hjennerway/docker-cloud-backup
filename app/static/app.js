@@ -447,6 +447,7 @@ function renderStacks() {
     (manualSelectionsSaving.get(stack.name) ?? stack.include_in_manual_backup);
   const selected = state.stacks.filter(included);
   const needsReview = selected.some((stack) => stack.issues.length);
+  $("backup-selected").hidden = false;
   $("backup-selected").textContent = `Backup ${selected.length} selected`;
   $("backup-selected").disabled = !selected.length || needsReview || state.busy ||
     !!state.docker_error || !!state.recovery.length || manualBackupBusy || !!manualSelectionsSaving.size;
@@ -539,7 +540,7 @@ function renderStackRow(s, included, host = null) {
         const label = host.id === "local" ? "local" : host.name;
         return html.replace(`<strong>${esc(s.name)}</strong>`, `<strong>${esc(s.name)}</strong><span class="badge neutral">${esc(label)}</span>`)
           .replace(/data-action="(selection|schedule|review)"/g, `data-action="host-stacks" data-stack-action="$1" data-id="${esc(host.id)}"`)
-          .replace(/<input type="checkbox"[^>]*>/, `<input type="checkbox" role="switch" ${included(s) ? "checked" : ""} disabled>`);
+          .replace(manualToggle, `<div class="manual-backup-cell"><span class="badge neutral">${included(s) ? "Included" : "Not included"}</span><small>Saved manual backup selection</small><button class="text-button" data-action="host-stacks" data-id="${esc(host.id)}" aria-label="Manage manual backups for ${esc(s.name)} on ${esc(label)}">Open host</button></div>`);
 }
 
 async function loadStackOverview() {
@@ -554,9 +555,9 @@ function renderStackOverview() {
   const offline = hosts.filter((host) => host.error).length;
   $("stack-count").textContent = stacks.length;
   $("stack-total").textContent = stacks.length;
-  $("backup-selected").textContent = "Manage backups per host";
+  $("backup-selected").hidden = true;
   $("backup-selected").disabled = true;
-  $("manual-backup-hint").textContent = "All configured hosts are shown below. Choose contents, Schedule or Back up opens the stack on its host. Manual backup switches show the saved selection; edit them in the host view.";
+  $("manual-backup-hint").textContent = "You’re viewing all hosts. Manual backup selections and batch backups are managed separately on each host. Choose Open host in a row to change its selection or back up selected stacks.";
   $("metrics").innerHTML = [["Docker hosts", hosts.length], ["Discovered stacks", stacks.length],
     ["Containers", stacks.reduce((total, stack) => total + stack.containers.length, 0)], ["Hosts needing attention", offline]]
     .map(([title, count]) => `<article class="metric"><div class="metric-top"><span>${title}</span></div><strong>${count}</strong><small>Across all configured hosts</small></article>`).join("");
