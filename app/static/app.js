@@ -21,6 +21,8 @@ let state = null,
   toastTimer,
   folderTrail = [];
 const manualSelectionsSaving = new Map();
+const scheduleDrafts = new Map(), schedulesSaving = new Set();
+const stackRowKey = (host, name) => JSON.stringify([host, name]);
 let selectedHost = sessionStorage.getItem("docker-host") || "local";
 let hostName = "Local Docker host", pendingHostActions = 0;
 let remoteHostConfigs = [];
@@ -57,10 +59,11 @@ function toast(message, failure = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => ($("toast").className = ""), 7000);
 }
-async function api(url, method = "GET", data) {
+async function api(url, method = "GET", data, host = null) {
   if (method !== "GET") pendingHostActions++;
   try {
-    const response = await fetch(apiPath(url), {
+    const path = host === null ? apiPath(url) : "/api" + (host === "local" ? "" : "/hosts/" + encodeURIComponent(host)) + url;
+    const response = await fetch(path, {
       method,
       headers: {
         "Content-Type": "application/json",
@@ -437,6 +440,7 @@ $("restore-start").onclick = async () => {
   finally { restoreBusy = false; renderRestore(); }
 };
 function renderStacks() {
+  if (document.activeElement?.closest("[data-inline-schedule]")) return;
   $("stack-host-view").value = stackHostView;
   if (stackHostView === "all" && stackOverview) {
     renderStackOverview();
@@ -444,7 +448,7 @@ function renderStacks() {
   }
   if (!state) return;
   const included = (stack) => !stack.excluded &&
-    (manualSelectionsSaving.get(stack.name) ?? stack.include_in_manual_backup);
+    (manualSelectionsSaving.get(stackRowKey(selectedHost, stack.name)) ?? stack.include_in_manual_backup);
   const selected = state.stacks.filter(included);
   const needsReview = selected.some((stack) => stack.issues.length);
   $("backup-selected").hidden = false;
@@ -534,13 +538,17 @@ function renderStackRow(s, included, host = null) {
             : '<span class="badge warn">Needs review</span>';
         const mode = selectionSummary(s);
         const volumes = s.volumes.map((v) => `<li><strong>${esc(v.name)}</strong><small>${v.type === "bind" ? "Bind mount" : "Named volume"} · ${size(v.size_bytes)}${s.backup_selection.mode === "volumes" && s.backup_selection.volumes.includes(v.id) ? " · Included" : ""}</small></li>`).join("");
-        const manualToggle = `<div class="manual-backup-cell"><label class="manual-backup-toggle"><input type="checkbox" role="switch" data-manual-backup data-name="${esc(s.name)}" ${included(s) ? "checked" : ""} ${s.excluded || manualSelectionsSaving.has(s.name) || manualBackupBusy ? "disabled" : ""}><span>Include in manual backup<span class="sr-only"> for ${esc(s.name)}</span></span></label></div>`;
-        const html = `<article class="stack-row${included(s) || s.schedule.enabled ? " stack-row-highlighted" : ""}"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div>${manualToggle}<div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
+        const hostId = host?.id || selectedHost;
+        const key = stackRowKey(hostId, s.name);
+        const draft = scheduleDrafts.get(key) || s.schedule;
+        const saving = schedulesSaving.has(key);
+        const scheduleEditor = `<form data-inline-schedule data-host="${esc(hostId)}" data-name="${esc(s.name)}"><label class="manual-backup-toggle"><input name="enabled" type="checkbox" role="switch" ${draft.enabled ? "checked" : ""} ${s.excluded || saving ? "disabled" : ""}><span>Scheduled backups<span class="sr-only"> for ${esc(s.name)}</span></span></label><label>Schedule (cron)<input name="cron" value="${esc(draft.cron || "0 3 * * *")}" placeholder="0 3 * * *" required ${s.excluded || saving ? "disabled" : ""}></label><label>Timezone<input name="timezone" value="${esc(draft.timezone || state?.timezone || "UTC")}" required ${s.excluded || saving ? "disabled" : ""}></label><small>Minute · hour · day · month · weekday</small><small>${s.schedule.enabled ? `Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}` : "Schedule paused"}</small><button class="secondary" ${s.excluded || saving ? "disabled" : ""}>${saving ? "Saving…" : "Save schedule"}</button></form>`;
+        const manualToggle = `<div class="manual-backup-cell"><label class="manual-backup-toggle"><input type="checkbox" role="switch" data-manual-backup data-host="${esc(hostId)}" data-name="${esc(s.name)}" ${(manualSelectionsSaving.get(key) ?? included(s)) ? "checked" : ""} ${s.excluded || manualSelectionsSaving.has(key) || manualBackupBusy ? "disabled" : ""}><span>Include in manual backup<span class="sr-only"> for ${esc(s.name)}</span></span></label></div>`;
+        const html = `<article class="stack-row${included(s) || s.schedule.enabled ? " stack-row-highlighted" : ""}"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${scheduleEditor}</div>${manualToggle}<div class="row-actions"><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
         if (!host) return html;
         const label = host.id === "local" ? "local" : host.name;
         return html.replace(`<strong>${esc(s.name)}</strong>`, `<strong>${esc(s.name)}</strong><span class="badge neutral">${esc(label)}</span>`)
-          .replace(/data-action="(selection|schedule|review)"/g, `data-action="host-stacks" data-stack-action="$1" data-id="${esc(host.id)}"`)
-          .replace(manualToggle, `<div class="manual-backup-cell"><span class="badge neutral">${included(s) ? "Included" : "Not included"}</span><small>Saved manual backup selection</small><button class="text-button" data-action="host-stacks" data-id="${esc(host.id)}" aria-label="Manage manual backups for ${esc(s.name)} on ${esc(label)}">Open host</button></div>`);
+          .replace(/data-action="(selection|schedule|review)"/g, `data-action="host-stacks" data-stack-action="$1" data-id="${esc(host.id)}"`);
 }
 
 async function loadStackOverview() {
@@ -557,7 +565,7 @@ function renderStackOverview() {
   $("stack-total").textContent = stacks.length;
   $("backup-selected").hidden = true;
   $("backup-selected").disabled = true;
-  $("manual-backup-hint").textContent = "You’re viewing all hosts. Manual backup selections and batch backups are managed separately on each host. Choose Open host in a row to change its selection or back up selected stacks.";
+  $("manual-backup-hint").textContent = "Edit schedules and manual backup selections directly in this list. Changes are saved to the host shown beside each stack. Batch backups are managed separately on each host.";
   $("metrics").innerHTML = [["Docker hosts", hosts.length], ["Discovered stacks", stacks.length],
     ["Containers", stacks.reduce((total, stack) => total + stack.containers.length, 0)], ["Hosts needing attention", offline]]
     .map(([title, count]) => `<article class="metric"><div class="metric-top"><span>${title}</span></div><strong>${count}</strong><small>Across all configured hosts</small></article>`).join("");
@@ -952,7 +960,48 @@ async function browseFolders(id = "root", name = "My Drive", up = false) {
       `<h2>Could not load folders</h2><p class="error">${esc(e.message)}</p><button class="secondary" data-action="close">Close</button>`;
   }
 }
+function inlineScheduleValues(form) {
+  return {cron: form.elements.cron.value.trim(), timezone: form.elements.timezone.value.trim(),
+    enabled: form.elements.enabled.checked};
+}
+document.addEventListener("input", (e) => {
+  const form = e.target.closest("[data-inline-schedule]");
+  if (form) scheduleDrafts.set(stackRowKey(form.dataset.host, form.dataset.name), inlineScheduleValues(form));
+});
+async function saveInlineSchedule(form) {
+  const {host, name} = form.dataset;
+  const key = stackRowKey(host, name);
+  if (schedulesSaving.has(key)) return;
+  const values = inlineScheduleValues(form);
+  scheduleDrafts.set(key, values);
+  schedulesSaving.add(key);
+  for (const element of form.elements) element.disabled = true;
+  try {
+    await api(`/stacks/${encodeURIComponent(name)}/schedule`, "PUT", values, host);
+    scheduleDrafts.delete(key);
+    toast("Schedule saved.");
+    await refresh(true);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    schedulesSaving.delete(key);
+    for (const element of form.elements) element.disabled = false;
+    if (document.activeElement?.closest("[data-inline-schedule]") === form) document.activeElement.blur();
+    renderStacks();
+  }
+}
+document.addEventListener("submit", async (e) => {
+  const form = e.target.closest("[data-inline-schedule]");
+  if (!form) return;
+  e.preventDefault();
+  await saveInlineSchedule(form);
+});
 document.addEventListener("change", async (e) => {
+  const form = e.target.closest("[data-inline-schedule]");
+  if (form && e.target.name === "enabled") {
+    await saveInlineSchedule(form);
+    return;
+  }
   if (e.target.matches('input[name="stack-filter"]')) {
     stackFilter = e.target.value;
     renderStacks();
@@ -961,20 +1010,27 @@ document.addEventListener("change", async (e) => {
   const toggle = e.target.closest("[data-manual-backup]");
   if (!toggle || toggle.disabled) return;
   const name = toggle.dataset.name;
-  manualSelectionsSaving.set(name, toggle.checked);
+  const host = toggle.dataset.host || selectedHost;
+  const key = stackRowKey(host, name);
+  const checked = toggle.checked;
+  manualSelectionsSaving.set(key, checked);
   renderStacks();
   try {
     const result = await api(`/stacks/${encodeURIComponent(name)}/manual-backup`, "PUT", {
-      include_in_manual_backup: toggle.checked,
-    });
-    const stack = state && getStack(name);
+      include_in_manual_backup: checked,
+    }, host);
+    const stack = stackOverview?.hosts.find((h) => h.id === host)?.stacks.find((s) => s.name === name);
     if (stack) stack.include_in_manual_backup = result.include_in_manual_backup;
+    if (host === selectedHost && state) {
+      const local = getStack(name);
+      if (local) local.include_in_manual_backup = result.include_in_manual_backup;
+    }
     await refresh(true);
   } catch (e) {
     toast(e.message, true);
   } finally {
-    manualSelectionsSaving.delete(name);
-    if (state) renderStacks();
+    manualSelectionsSaving.delete(key);
+    renderStacks();
   }
 });
 document.addEventListener("click", async (e) => {
@@ -983,7 +1039,7 @@ document.addEventListener("click", async (e) => {
   try {
     switch (b.dataset.action) {
       case "host-stacks":
-        if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size) {
+        if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size || schedulesSaving.size) {
           toast("Finish the current action before switching hosts.", true);
           break;
         }
@@ -1257,6 +1313,8 @@ $("notification-form").onsubmit = async (e) => {
         "notification_token",
         "telegram_chat_id",
         "notify_success",
+        ...["success", "partial", "failed", "test"].flatMap((event) =>
+          ["title", "message"].map((field) => `notification_${event}_${field}`)),
       ]),
     );
     fillSettings();
@@ -1283,7 +1341,7 @@ $("stack-host-view").onchange = async (event) => {
 };
 $("add-remote-host").onclick = () => hostDialog();
 $("docker-host").onchange = (event) => {
-  if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size || $("modal").open) {
+  if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size || schedulesSaving.size || $("modal").open) {
     event.target.value = selectedHost;
     toast("Finish the current action or close its dialog before switching hosts.", true);
     return;

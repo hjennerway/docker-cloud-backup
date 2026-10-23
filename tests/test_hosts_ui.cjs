@@ -64,9 +64,10 @@ test("all-host stacks share one list with host badges, duplicate names and offli
   assert.equal(ui.element("backup-selected").disabled, true);
   assert.equal(ui.element("backup-selected").hidden, true);
   assert.match(ui.element("manual-backup-hint").textContent, /managed separately on each host/);
-  assert.match(html, /Saved manual backup selection/);
+  assert.match(html, /data-manual-backup data-host="nas"/);
+  assert.match(html, /data-inline-schedule data-host="local"/);
   assert.match(html, />Open host<\/button>/);
-  assert.doesNotMatch(html, /role="switch"/);
+  assert.equal((html.match(/role="switch"/g) || []).length, 4);
   ui.run("state = null; renderStacks();");
   assert.match(ui.element("stacks-list").innerHTML, /NAS/);
   ui.element("stack-search").value = "nas";
@@ -86,7 +87,7 @@ test("unified stacks sort across hosts and retain the host for duplicate names",
   assert.deepEqual([...html.matchAll(/<strong>(.*?)<\/strong>/g)].map((match) => match[1]),
     ["alpha", "beta", "Same", "Same", "Zulu"]);
   assert.deepEqual([...html.matchAll(/data-id="([^"]+)" data-name="Same"/g)].map((match) => match[1]),
-    ["local", "local", "local", "nas", "nas", "nas"]);
+    ["local", "local", "nas", "nas"]);
   ui.element("stack-search").value = "local";
   ui.run("renderStackOverview()");
   assert.doesNotMatch(ui.element("stacks-list").innerHTML, /data-id="nas"/);
@@ -121,4 +122,43 @@ test("all hosts is the default even after a previous selected-host view", () => 
   const navigation = workspace("nas", "selected", "selected");
   assert.equal(navigation.run("stackHostView"), "selected");
   assert.equal(navigation.stored.has("stack-host-navigation"), false);
+});
+
+
+test("inline schedule saves target the row host and preserve duplicate-name drafts", async () => {
+  const ui = workspace();
+  ui.context.form = {dataset: {host: "local", name: "same"}, elements: Object.assign([
+    {disabled: false}, {disabled: false}, {disabled: false}
+  ], {cron: {value: "0 4 * * *"}, timezone: {value: "Europe/London"}, enabled: {checked: true}})};
+  ui.run(`calls = []; api = async (...args) => {calls.push(args); return {ok: true};};
+    refresh = async () => {}; renderStacks = () => {};
+    scheduleDrafts.set(stackRowKey("nas", "same"), {cron: "0 5 * * *"});`);
+  await ui.run("saveInlineSchedule(form)");
+  assert.equal(ui.run('calls[0][3]'), "local");
+  assert.equal(ui.run('calls[0][0]'), "/stacks/same/schedule");
+  assert.equal(ui.run('calls[0][2].cron'), "0 4 * * *");
+  assert.equal(ui.run('scheduleDrafts.has(stackRowKey("local", "same"))'), false);
+  assert.equal(ui.run('scheduleDrafts.get(stackRowKey("nas", "same")).cron'), "0 5 * * *");
+  assert.equal(ui.run('schedulesSaving.size'), 0);
+});
+
+test("failed schedule saves retain edits and allow retry", async () => {
+  const ui = workspace();
+  ui.context.form = {dataset: {host: "nas", name: "same"}, elements: Object.assign([
+    {disabled: false}
+  ], {cron: {value: "invalid"}, timezone: {value: "UTC"}, enabled: {checked: false}})};
+  ui.run('api = async () => {throw new Error("Invalid cron");}; renderStacks = () => {};');
+  await ui.run("saveInlineSchedule(form)");
+  assert.equal(ui.run('scheduleDrafts.get(stackRowKey("nas", "same")).cron'), "invalid");
+  assert.equal(ui.element("toast").textContent, "Invalid cron");
+  assert.equal(ui.context.form.elements[0].disabled, false);
+});
+
+test("explicit host requests do not follow the selected host", async () => {
+  const ui = workspace("nas");
+  const calls = [];
+  ui.context.fetch = async (url) => {calls.push(url); return {ok: true, json: async () => ({})};};
+  await ui.run('api("/stacks/same/schedule", "PUT", {}, "local")');
+  await ui.run('api("/stacks/same/manual-backup", "PUT", {}, "other-host")');
+  assert.deepEqual(calls, ["/api/stacks/same/schedule", "/api/hosts/other-host/stacks/same/manual-backup"]);
 });

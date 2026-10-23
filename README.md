@@ -67,7 +67,7 @@ Docker Compose projects are grouped by labels. Saved inactive Dockge stacks are 
 
 ## Other Docker hosts
 
-The **Stacks** page defaults to **All hosts**, grouping stacks from every configured machine under its host name. Offline hosts show their connection error while reachable hosts remain visible. Search includes host, stack and container names. **Manage stack** opens that host's controls for the chosen stack; **Open host** opens all its stacks. Choose **All hosts** again to return to the combined view. Backup actions run in the selected host's workspace, so identically named stacks on different machines remain separate.
+The **Stacks** page defaults to **All hosts**, showing stacks in one sorted list with a host badge beside each name. Edit each row's cron schedule and timezone, then choose **Save schedule**. Scheduled-backup and manual-backup switches save immediately to that row's host. Edits survive background refreshes; failed saves retain your input for correction or retry. Offline hosts show their connection error while reachable hosts remain visible. Search includes host, stack and container names. Backup and content-selection actions open the corresponding host's workspace, so identically named stacks on different machines remain separate.
 
 The **Docker host** selector switches the workspace between hosts, including stacks, backups, restore targets, schedules, destinations and activity. Choosing a host sets the Stacks page to **Selected Docker host**. Each host runs its own Cloud Backup instance using the Compose setup above, with its own data volume and local Docker socket/host mounts. The host's worker performs backups, restores and restart recovery locally, including while the connection to your main instance is interrupted. Hosts are explicitly configured; the app does not scan the network.
 
@@ -190,6 +190,8 @@ Activity always provides status with no external setup. Optional providers:
 - **ntfy**: select a server and topic, then subscribe to that topic in the mobile app. Use an authenticated/self-hosted server for private alerts, or an unguessable topic for a simple setup.
 - **Telegram**: create a bot through BotFather, send it a message, then set its bot token and your numeric chat ID.
 - **Pushbullet**: provide an access token; the app sends a note.
+
+Each notification type (successful backup, partial upload, failed backup and test) has a title and message editor. Available placeholders are `{stack}` (stack name), `{status}` (event status), `{detail}` (result or error description), and `{job_id}` (job ID). Messages support multiple lines. Use `{{` and `}}` for literal braces. Templates apply to every provider.
 
 Save settings before using **Send a test**. Failure alerts are sent when enabled; successful-run alerts can be disabled. Delivery failures appear on the job without changing backup success to failure. WhatsApp is not included because its business API setup is disproportionate for a small home-server tool.
 

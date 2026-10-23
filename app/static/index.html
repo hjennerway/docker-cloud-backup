@@ -535,6 +535,27 @@
                   enabled. Notification delivery failures are recorded in
                   Activity.
                 </p>
+<h2>Message templates</h2><p class="hint">Customise each notification below. Templates apply to all notification services. Use {{ and }} for literal braces.</p>
+<details class="notification-template"><summary>Successful backup</summary>
+<label>Title<input id="notification_success_title" maxlength="4000" required /></label>
+<label>Message<textarea id="notification_success_message" rows="4" maxlength="4000" required></textarea></label>
+<p class="hint">Available in title and message: <code>{stack}</code> — stack name; <code>{status}</code> — success; <code>{detail}</code> — result or error description; <code>{job_id}</code> — job ID.</p>
+</details>
+<details class="notification-template"><summary>Partial upload</summary>
+<label>Title<input id="notification_partial_title" maxlength="4000" required /></label>
+<label>Message<textarea id="notification_partial_message" rows="4" maxlength="4000" required></textarea></label>
+<p class="hint">Available in title and message: <code>{stack}</code> — stack name; <code>{status}</code> — partial; <code>{detail}</code> — result or error description; <code>{job_id}</code> — job ID.</p>
+</details>
+<details class="notification-template"><summary>Failed backup</summary>
+<label>Title<input id="notification_failed_title" maxlength="4000" required /></label>
+<label>Message<textarea id="notification_failed_message" rows="4" maxlength="4000" required></textarea></label>
+<p class="hint">Available in title and message: <code>{stack}</code> — stack name; <code>{status}</code> — failed; <code>{detail}</code> — result or error description; <code>{job_id}</code> — job ID.</p>
+</details>
+<details class="notification-template"><summary>Test notification</summary>
+<label>Title<input id="notification_test_title" maxlength="4000" required /></label>
+<label>Message<textarea id="notification_test_message" rows="4" maxlength="4000" required></textarea></label>
+<p class="hint">Available in title and message: <code>{stack}</code> — stack name; <code>{status}</code> — test; <code>{detail}</code> — result or error description; <code>{job_id}</code> — job ID.</p>
+<p class="hint">Test values: stack = Example stack; job_id = test; detail = Your backup notifications are connected.</p></details>
                 <div class="actions">
                   <button class="primary">Save notifications</button
                   ><button

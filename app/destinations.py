@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 import requests
 
 from .discovery import BackupError
+from .notifications import TEMPLATE_DEFAULTS, validate_templates
 
 
 class DriveAccessTokenError(BackupError):
@@ -39,6 +40,7 @@ def parse_smb(value):
 
 
 def validate_settings(settings):
+    validate_templates(settings)
     if not isinstance(settings["keep_days"], int) or not 1 <= settings["keep_days"] <= 3650:
         raise BackupError("Retention must be between 1 and 3650 days.")
     if settings["smb_enabled"]:
@@ -46,7 +48,7 @@ def validate_settings(settings):
         if not settings["smb_user"]:
             raise BackupError("Enter an SMB username.")
     for key, value in settings.items():
-        if isinstance(value, str) and (len(value) > 16000 or any(c in value for c in "\r\n\0")):
+        if key not in TEMPLATE_DEFAULTS and isinstance(value, str) and (len(value) > 16000 or any(c in value for c in "\r\n\0")):
             raise BackupError(f"Invalid value for {key}.")
     if settings["drive_token"]:
         try:

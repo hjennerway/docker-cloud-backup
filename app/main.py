@@ -28,6 +28,7 @@ from starlette.background import BackgroundTask
 from .backup import BackupEngine, next_run, utcnow
 from .auth import Credentials
 from .destinations import Destinations, notify, validate_settings
+from .notifications import render_notification
 from .discovery import BackupError, Discovery, validate_rule
 from .store import DEFAULTS, SECRETS, Store
 from .restore import restore_limit
@@ -543,7 +544,8 @@ def create_app(store=None, client=None, start_worker=True):
         settings = store.settings()
         if settings["notification_type"] == "none":
             raise BackupError("Choose and save a notification service first.")
-        notify(settings, "Cloud Backup test", "Your backup notifications are connected.")
+        notify(settings, *render_notification(settings, "test", stack="Example stack",
+                                             detail="Your backup notifications are connected.", job_id="test"))
         return {"message": "Test notification sent."}
 
     @app.post("/api/drive/connect")

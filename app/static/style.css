@@ -432,7 +432,7 @@ main {
 .table-head,
 .stack-row {
   display: grid;
-  grid-template-columns: minmax(130px, 1fr) minmax(130px, 0.9fr) minmax(160px, 1.4fr) minmax(110px, 0.9fr) 125px 140px;
+  grid-template-columns: minmax(130px, 1fr) minmax(130px, 0.9fr) minmax(160px, 1.4fr) minmax(180px, 1fr) 125px 140px;
   min-width: 930px;
   align-items: center;
   gap: 14px;
@@ -1313,7 +1313,7 @@ dialog::backdrop {
   }
   .table-head,
   .stack-row {
-    grid-template-columns: minmax(130px, 1fr) 140px minmax(180px, 1.4fr) 125px 130px 112px;
+    grid-template-columns: minmax(130px, 1fr) 140px minmax(150px, 1.2fr) 180px 130px 100px;
     gap: 10px;
     padding-left: 17px;
     padding-right: 17px;
@@ -1542,3 +1542,13 @@ dialog::backdrop {
     height: 34px;
   }
 }
+
+.notification-template { margin: 16px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; }
+.notification-template summary { cursor: pointer; font-weight: 600; margin-bottom: 12px; }
+.notification-template textarea { width: 100%; resize: vertical; }
+
+.schedule-cell form { display: grid; gap: 8px; min-width: 0; }
+.schedule-cell form label { margin: 0; font-size: 12px; }
+.schedule-cell form input:not([type="checkbox"]) { margin-top: 4px; padding: 8px; }
+.schedule-cell form .manual-backup-toggle { align-items: center; }
+.schedule-cell form small { overflow-wrap: anywhere; }

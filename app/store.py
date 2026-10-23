@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from cryptography.fernet import Fernet
+from .notifications import TEMPLATE_DEFAULTS
 
 
 DEFAULTS = {
@@ -16,6 +17,7 @@ DEFAULTS = {
     "notification_type": "none", "notification_url": "https://ntfy.sh",
     "notification_topic": "", "notification_token": "", "telegram_chat_id": "",
     "notify_success": True,
+    **TEMPLATE_DEFAULTS,
 }
 SECRETS = {"smb_password", "drive_token", "drive_client_secret", "notification_token"}
 

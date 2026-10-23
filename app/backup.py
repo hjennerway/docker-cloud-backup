@@ -19,6 +19,7 @@ from croniter import croniter
 from docker.errors import NotFound
 
 from .destinations import notify
+from .notifications import render_notification
 from .discovery import BackupError, start_order
 from .restore import RestoreManager
 
@@ -344,7 +345,7 @@ class BackupEngine:
         if status == "success" and not settings["notify_success"]:
             return
         try:
-            notify(settings, "Cloud Backup: " + status, name + "\n" + detail)
+            notify(settings, *render_notification(settings, status, stack=name, detail=detail, job_id=job_id))
         except BackupError as exc:
             self.store.job_update(job_id, notification_error=str(exc))
 
