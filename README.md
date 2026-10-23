@@ -65,6 +65,29 @@ The app reads raw Compose files rather than a substituted `docker compose config
 
 Docker Compose projects are grouped by labels. Saved inactive Dockge stacks are discovered from `STACKS_ROOT` and Dockge's own mounted stacks directory. Inactive stacks and standalone `docker run` containers appear with explanations; create Compose containers before enabling their config backups. Compose `include` / `extends` and unresolved environment-based file paths fail preflight rather than produce incomplete archives. Use a flattened standalone Compose file for these cases.
 
+## Other Docker hosts
+
+The **Docker host** selector switches the entire workspace between hosts, including stacks, backups, restore targets, schedules, destinations and activity. Each host runs its own Cloud Backup instance using the Compose setup above, with its own data volume and local Docker socket/host mounts. The host's worker performs backups, restores and restart recovery locally, including while the connection to your main instance is interrupted. Hosts are explicitly configured; the app does not scan the network.
+
+On the main instance, create a private `docker-hosts.json` file:
+
+```json
+[
+  {
+    "id": "nas",
+    "name": "NAS",
+    "url": "https://nas-backup.example.com",
+    "password": "the-current-admin-password-on-the-nas"
+  }
+]
+```
+
+Add `./docker-hosts.json:/run/docker-hosts.json:ro` to its Compose volumes and set `DOCKER_HOSTS_FILE=/run/docker-hosts.json` in `.env`, then recreate the main container. Use the remote instance's reachable base URL without a subpath. Host IDs must be unique lowercase letters/digits/hyphens, up to 40 characters; `local` is reserved. Protect this file like an admin password, keep it out of source control, and use HTTPS on untrusted networks. The credentials stay on the main server and are never returned to the browser. Changes to the file require restarting the main instance; update the file if a remote password changes.
+
+Choose a host in the sidebar to work with its containers. Stack names can repeat across hosts because each host keeps its own settings and history. Downloads and restore uploads pass through the main instance; allow disk space there for an uploaded archive and set `MAX_BACKUP_GB` appropriately on both instances. A remote outage leaves the selector available so you can switch back. Close open dialogs and finish pending actions before switching. Running backup jobs continue on their original host.
+
+Google Drive's LAN token connection works through the selector. For browser-based Google OAuth, open the remote instance directly to complete sign-in. **Change password** always changes the main instance's password. Install this version on every connected host, and run only one instance per host/data volume.
+
 ## Image mappings
 
 Mappings live in SQLite (`/data/backup.sqlite3`) and are edited in **Image mappings**. Seed rules cover common Sonarr, Radarr, Prowlarr, SABnzbd, qBittorrent, Seerr/Jellyseerr, Jellyfin, Uptime Kuma, Portainer, Mosquitto, n8n, go2rtc, NetAlertX, Dockge, Otter Wiki, Home Assistant, Frigate and Dashy images.

@@ -3,6 +3,7 @@ __pycache__/
 .pytest_cache/
 *.pyc
 .env
+docker-hosts.json
 data/
 .test-data/
 *.tar.gz

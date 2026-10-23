@@ -12,8 +12,11 @@ services:
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       STACKS_ROOT: ${STACKS_ROOT:-/opt/stacks}
       MAX_BACKUP_GB: ${MAX_BACKUP_GB:-10}
+      DOCKER_HOSTS_FILE: ${DOCKER_HOSTS_FILE:-}
     volumes:
       - backup-data:/data
+      # Optional: mount ./docker-hosts.json:/run/docker-hosts.json:ro and set
+      # DOCKER_HOSTS_FILE=/run/docker-hosts.json to manage other hosts.
       - /var/run/docker.sock:/var/run/docker.sock
       # Read Compose files at paths recorded in Docker labels; never write to host.
       - /:/host:ro

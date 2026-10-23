@@ -2,9 +2,11 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import secrets
 import shutil
 import threading
+import tempfile
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -15,11 +17,12 @@ from urllib.parse import urlencode, urlparse
 import docker
 import requests
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeTimedSerializer
 from pydantic import BaseModel, Field, StrictBool
 from starlette.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 
 from .backup import BackupEngine, next_run, utcnow
 from .auth import Credentials
@@ -28,6 +31,7 @@ from .discovery import BackupError, Discovery, validate_rule
 from .store import DEFAULTS, SECRETS, Store
 from .restore import restore_limit
 from .scheduled import scheduled_jobs
+from .hosts import Hosts
 
 
 class Login(BaseModel):
@@ -77,6 +81,7 @@ def create_app(store=None, client=None, start_worker=True):
     store = store or Store(os.getenv("DATA_DIR", "/data"))
     serializer = URLSafeTimedSerializer(store.cipher._signing_key, salt="cloud-backup-session-v1")
     credentials = Credentials(store)
+    hosts = Hosts()
     attempts, attempt_lock = {}, threading.Lock()
 
     app = FastAPI(title="Docker Cloud Backup", docs_url=None, redoc_url=None, openapi_url=None)
@@ -147,7 +152,8 @@ def create_app(store=None, client=None, start_worker=True):
                 content_length = int(request.headers.get("content-length", 0))
             except ValueError:
                 return JSONResponse({"detail": "Invalid request size."}, status_code=400)
-            limit = restore_limit() if request.url.path == "/api/restore/upload" else 100000
+            is_upload = request.url.path == "/api/restore/upload" or re.fullmatch(r"/api/hosts/[^/]+/restore/upload", request.url.path)
+            limit = restore_limit() if is_upload else 100000
             if content_length < 0 or content_length > limit:
                 return JSONResponse({"detail": "Request is too large."}, status_code=413)
         response = await call_next(request)
@@ -208,10 +214,52 @@ def create_app(store=None, client=None, start_worker=True):
         return signed_in_response(version, user["id"])
 
     @app.post("/api/logout")
-    def logout():
+    def logout(request: Request):
+        user = session(request)
+        if user:
+            hosts.forget(user["id"])
         response = JSONResponse({"ok": True})
         response.delete_cookie("session")
         return response
+
+    @app.get("/api/hosts")
+    def list_hosts():
+        return {"hosts": hosts.public()}
+
+    @app.api_route("/api/hosts/{host_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+    async def remote_host(host_id: str, path: str, request: Request):
+        if host_id not in hosts.hosts:
+            raise HTTPException(404, "Unknown Docker host.")
+        limit = restore_limit() if path == "restore/upload" else 100000
+        # Spool large uploads into the data volume rather than RAM or /tmp.
+        body = tempfile.TemporaryFile(dir=store.root)
+        upstream = None
+        try:
+            size = 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if size > limit:
+                    raise HTTPException(413, "Request is too large.")
+                if shutil.disk_usage(store.root).free < len(chunk) + 256 * 1024 * 1024:
+                    raise BackupError("Not enough free space to relay this upload.")
+                await run_in_threadpool(body.write, chunk)
+            body.seek(0)
+            upstream = await run_in_threadpool(hosts.request, host_id, session(request)["id"], request.method,
+                                              path, list(request.query_params.multi_items()), body if size else None,
+                                              request.headers.get("content-type", "application/json"))
+        finally:
+            body.close()
+
+        def chunks():
+            try:
+                yield from upstream.iter_content(chunk_size=1024 * 1024)
+            finally:
+                upstream.close()
+
+        headers = {k: v for k, v in upstream.headers.items()
+                   if k.lower() in {"content-type", "content-disposition"}}
+        return StreamingResponse(chunks(), status_code=upstream.status_code, headers=headers,
+                                 background=BackgroundTask(upstream.close))
 
     @app.get("/api/dashboard")
     def dashboard():

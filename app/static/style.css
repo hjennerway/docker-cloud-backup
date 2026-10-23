@@ -15,6 +15,10 @@
   font-size: 14px;
   font-synthesis: none;
 }
+#docker-host {
+  width: 100%;
+  margin: 8px 0 16px;
+}
 * {
   box-sizing: border-box;
 }
@@ -383,6 +387,43 @@ main {
   border-radius: 10px;
   overflow-x: auto;
   background: #fff;
+}
+.stack-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.stack-filters label {
+  position: relative;
+  cursor: pointer;
+}
+.stack-filters input {
+  position: absolute;
+  opacity: 0;
+  width: 1px;
+  height: 1px;
+}
+.stack-filters label > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+}
+.stack-filters input:checked + span {
+  background: #e5f3ea;
+  border-color: #7eaa91;
+}
+.stack-filters input:focus-visible + span {
+  outline: 2px solid #397953;
+  outline-offset: 2px;
+}
+.stack-row.stack-row-highlighted {
+  background: #f1f8f3;
 }
 .table-head,
 .stack-row {

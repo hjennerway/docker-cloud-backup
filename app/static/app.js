@@ -21,6 +21,14 @@ let state = null,
   toastTimer,
   folderTrail = [];
 const manualSelectionsSaving = new Map();
+let selectedHost = sessionStorage.getItem("docker-host") || "local";
+let hostName = "Local Docker host", pendingHostActions = 0;
+const localEndpoints = new Set(["/login", "/logout", "/session", "/password", "/hosts"]);
+function apiPath(url) {
+  return "/api" + (selectedHost !== "local" && !localEndpoints.has(url)
+    ? "/hosts/" + encodeURIComponent(selectedHost) : "") + url;
+}
+let stackFilter = "all";
 let scheduledDays = 7,
   scheduledData = null,
   scheduledStart = null,
@@ -45,30 +53,36 @@ function toast(message, failure = false) {
   toastTimer = setTimeout(() => ($("toast").className = ""), 7000);
 }
 async function api(url, method = "GET", data) {
-  const response = await fetch("/api" + url, {
-    method,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Requested-With": "cloud-backup",
-    },
-    body: data === undefined ? undefined : JSON.stringify(data),
-  });
-  let result;
+  if (method !== "GET") pendingHostActions++;
   try {
-    result = await response.json();
-  } catch {
-    throw new Error("The app did not respond. Check its container status.");
+    const response = await fetch(apiPath(url), {
+      method,
+      headers: {
+        "Content-Type": "application/json",
+        "X-Requested-With": "cloud-backup",
+      },
+      body: data === undefined ? undefined : JSON.stringify(data),
+    });
+    let result;
+    try {
+      result = await response.json();
+    } catch {
+      throw new Error("The app did not respond. Check its container status.");
+    }
+    if (!response.ok) {
+      if (response.status === 401 && url !== "/login") showLogin();
+      throw new Error(
+        typeof result.detail === "string"
+          ? result.detail
+          : "Check the values and try again.",
+      );
+    }
+    return result;
+  } finally {
+    if (method !== "GET") pendingHostActions--;
   }
-  if (!response.ok) {
-    if (response.status === 401 && url !== "/login") showLogin();
-    throw new Error(
-      typeof result.detail === "string"
-        ? result.detail
-        : "Check the values and try again.",
-    );
-  }
-  return result;
 }
+
 function date(value, timezone) {
   if (!value) return "Not scheduled";
   return new Intl.DateTimeFormat(undefined, {
@@ -164,6 +178,7 @@ function render() {
   $("host-state").textContent = state.docker_error
     ? "Connection unavailable"
     : "Connected · auto-discovery";
+  $("host-name").textContent = hostName;
   let alerts = [];
   if (state.docker_error) alerts.push(state.docker_error);
   if (state.recovery.length && !state.busy)
@@ -294,7 +309,7 @@ function renderRestore() {
   $("restore-upload").disabled = blocked || !container || !$("restore-file").files.length;
   $("restore-start").disabled = blocked || !restorePreview || !$("restore-confirm").checked;
   $("restore-container-info").textContent = container ? container.image :
-    restoreMaxBytes && !restoreContainers.length ? "No available containers. Create or start a local container first. Excluded stacks are omitted." : "";
+    restoreMaxBytes && !restoreContainers.length ? "No available containers. Create or start a container on the selected host first. Excluded stacks are omitted." : "";
   if (restoreJobId && state) {
     const job = state.jobs.find((j) => j.id === restoreJobId);
     if (job) {
@@ -306,7 +321,7 @@ function renderRestore() {
 function uploadRestoreFile(file) {
   return new Promise((resolve, reject) => {
     const request = new XMLHttpRequest();
-    request.open("POST", "/api/restore/upload?filename=" + encodeURIComponent(file.name));
+    request.open("POST", apiPath("/restore/upload") + "?filename=" + encodeURIComponent(file.name));
     request.setRequestHeader("X-Requested-With", "cloud-backup");
     request.setRequestHeader("Content-Type", "application/octet-stream");
     request.upload.onprogress = (event) => {
@@ -433,7 +448,7 @@ function renderStacks() {
     metric(
       "Discovered stacks",
       state.stacks.length,
-      "On this Docker host",
+      esc(hostName),
       "▦",
       "stacks",
     ) +
@@ -464,12 +479,21 @@ function renderStacks() {
       "✓",
     );
   const query = $("stack-search").value.toLowerCase();
+  const filters = {
+    all: () => true,
+    manual: included,
+    scheduled: (s) => s.schedule.enabled,
+    paused: (s) => !s.schedule.enabled,
+  };
+  for (const [filter, matches] of Object.entries(filters)) {
+    $(`stack-filter-${filter}-count`).textContent = state.stacks.filter(matches).length;
+  }
   const stacks = state.stacks.filter((s) =>
-    s.name.toLowerCase().includes(query),
+    s.name.toLowerCase().includes(query) && filters[stackFilter](s),
   );
   if (!stacks.length) {
     $("stacks-list").innerHTML =
-      `<div class="empty"><h3>${query ? "No matching stacks" : "No stacks discovered yet"}</h3><p>${query ? "Try a different search." : "Compose labels and saved Dockge stacks will appear here. Check Docker and the read-only host mount."}</p></div>`;
+      `<div class="empty"><h3>${query || stackFilter !== "all" ? "No matching stacks" : "No stacks discovered yet"}</h3><p>${query || stackFilter !== "all" ? "Try a different search or filter." : "Compose labels and saved Dockge stacks will appear here. Check Docker and the read-only host mount."}</p></div>`;
     return;
   }
   $("stacks-list").innerHTML =
@@ -488,7 +512,7 @@ function renderStacks() {
         const mode = selectionSummary(s);
         const volumes = s.volumes.map((v) => `<li><strong>${esc(v.name)}</strong><small>${v.type === "bind" ? "Bind mount" : "Named volume"} · ${size(v.size_bytes)}${s.backup_selection.mode === "volumes" && s.backup_selection.volumes.includes(v.id) ? " · Included" : ""}</small></li>`).join("");
         const manualToggle = `<div class="manual-backup-cell"><label class="manual-backup-toggle"><input type="checkbox" role="switch" data-manual-backup data-name="${esc(s.name)}" ${included(s) ? "checked" : ""} ${s.excluded || manualSelectionsSaving.has(s.name) || manualBackupBusy ? "disabled" : ""}><span>Include in manual backup<span class="sr-only"> for ${esc(s.name)}</span></span></label></div>`;
-        return `<article class="stack-row"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div>${manualToggle}<div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
+        return `<article class="stack-row${included(s) || s.schedule.enabled ? " stack-row-highlighted" : ""}"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div>${manualToggle}<div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
       })
       .join("");
 }
@@ -501,7 +525,7 @@ function renderJobs() {
   $("jobs-list").innerHTML = state.jobs
     .map(
       (j) =>
-        `<article class="job-card"><div class="job-title"><h3>${esc(j.stack)}</h3>${badge(j.status)}<time>${esc(date(j.started))}</time></div><p>${esc(j.detail || "Waiting for the backup worker…")}</p>${j.notification_error ? `<p class="error">Notification: ${esc(j.notification_error)}</p>` : ""}<div class="job-meta"><span>${size(j.size)}</span>${j.finished ? `<span>Finished ${esc(date(j.finished))}</span>` : ""}${j.archive ? `<a href="/api/jobs/${esc(j.id)}/download">↓ Download archive</a>` : ""}${j.archive && ["partial", "success"].includes(j.status) ? `<button class="text-button" data-action="retry" data-id="${esc(j.id)}" ${state.busy ? "disabled" : ""}>Retry upload</button>` : ""}</div>${j.sha256 ? `<details><summary>SHA-256 checksum</summary><p class="checksum"><code>${esc(j.sha256)}</code></p></details>` : ""}</article>`,
+        `<article class="job-card"><div class="job-title"><h3>${esc(j.stack)}</h3>${badge(j.status)}<time>${esc(date(j.started))}</time></div><p>${esc(j.detail || "Waiting for the backup worker…")}</p>${j.notification_error ? `<p class="error">Notification: ${esc(j.notification_error)}</p>` : ""}<div class="job-meta"><span>${size(j.size)}</span>${j.finished ? `<span>Finished ${esc(date(j.finished))}</span>` : ""}${j.archive ? `<a href="${apiPath(`/jobs/${encodeURIComponent(j.id)}/download`)}">↓ Download archive</a>` : ""}${j.archive && ["partial", "success"].includes(j.status) ? `<button class="text-button" data-action="retry" data-id="${esc(j.id)}" ${state.busy ? "disabled" : ""}>Retry upload</button>` : ""}</div>${j.sha256 ? `<details><summary>SHA-256 checksum</summary><p class="checksum"><code>${esc(j.sha256)}</code></p></details>` : ""}</article>`,
     )
     .join("");
 }
@@ -781,6 +805,11 @@ async function browseFolders(id = "root", name = "My Drive", up = false) {
   }
 }
 document.addEventListener("change", async (e) => {
+  if (e.target.matches('input[name="stack-filter"]')) {
+    stackFilter = e.target.value;
+    renderStacks();
+    return;
+  }
   const toggle = e.target.closest("[data-manual-backup]");
   if (!toggle || toggle.disabled) return;
   const name = toggle.dataset.name;
@@ -872,14 +901,22 @@ document.addEventListener("click", async (e) => {
 });
 $("login-form").onsubmit = async (e) => {
   e.preventDefault();
+  const button = $("login-form").querySelector("button");
+  if (button.disabled) return;
+  const label = button.innerHTML;
+  button.disabled = true;
+  button.textContent = "Signing in…";
   $("login-error").textContent = "";
   try {
     await api("/login", "POST", { password: $("password").value });
     $("password").value = "";
-    await refresh();
-    showApp();
+    // Start with the new session instead of reusing requests or UI state from
+    // before authentication. Keep the current route when loading the dashboard.
+    window.location.reload();
   } catch (e) {
     $("login-error").textContent = e.message;
+    button.disabled = false;
+    button.innerHTML = label;
   }
 };
 $("logout").onclick = async () => {
@@ -1070,6 +1107,15 @@ $("test-notification").onclick = async () => {
   }
 };
 window.addEventListener("hashchange", route);
+$("docker-host").onchange = (event) => {
+  if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size || $("modal").open) {
+    event.target.value = selectedHost;
+    toast("Finish the current action or close its dialog before switching hosts.", true);
+    return;
+  }
+  sessionStorage.setItem("docker-host", event.target.value);
+  window.location.reload();
+};
 setInterval(() => {
   if (state && !document.hidden) refresh().catch(() => {});
 }, 10000);
@@ -1077,11 +1123,26 @@ setInterval(() => {
   try {
     const result = await api("/session");
     if (result.authenticated) {
+      const { hosts } = await api("/hosts");
+      if (!hosts.some((host) => host.id === selectedHost)) {
+        selectedHost = "local";
+        sessionStorage.removeItem("docker-host");
+      }
+      hostName = hosts.find((host) => host.id === selectedHost).name;
+      $("docker-host").innerHTML = hosts.map((host) => `<option value="${esc(host.id)}">${esc(host.name)}</option>`).join("");
+      $("docker-host").value = selectedHost;
       await refresh();
       showApp();
     } else showLogin();
   } catch (e) {
-    showLogin();
-    $("login-error").textContent = e.message;
+    if ($("docker-host").options.length > 1) {
+      showApp();
+      $("host-name").textContent = hostName;
+      $("host-state").textContent = "Connection unavailable";
+      $("global-alert").textContent = e.message + " Select another Docker host to continue.";
+    } else {
+      showLogin();
+      $("login-error").textContent = e.message;
+    }
   }
 })();

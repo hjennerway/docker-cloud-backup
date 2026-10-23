@@ -87,10 +87,12 @@
           >
         </nav>
         <div class="sidebar-bottom">
+          <label for="docker-host">Docker host</label>
+          <select id="docker-host" aria-label="Docker host"><option value="local">Local Docker host</option></select>
           <div class="host-status">
             <i></i
             ><span
-              >Local Docker host<small id="host-state">Connecting…</small></span
+              ><span id="host-name">Local Docker host</span><small id="host-state">Connecting…</small></span
             >
           </div>
           <button id="logout" class="quiet">Sign out ↗</button>
@@ -104,7 +106,7 @@
           </div>
           <div class="topbar-right">
             <span class="private-label">◈ Private workspace</span
-            ><button id="change-password" class="text-button">Change password</button
+            ><button id="change-password" class="text-button" title="Change the main app's password">Change password</button
             ><span class="avatar">CB</span>
           </div>
         </header>
@@ -144,6 +146,12 @@
                   type="search"
               /></label>
             </div>
+            <div class="stack-filters" role="radiogroup" aria-label="Filter stacks">
+              <label><input type="radio" name="stack-filter" value="all" checked> <span>All <span id="stack-filter-all-count" class="count-pill">0</span></span></label>
+              <label><input type="radio" name="stack-filter" value="manual"> <span>Manual backup <span id="stack-filter-manual-count" class="count-pill">0</span></span></label>
+              <label><input type="radio" name="stack-filter" value="scheduled"> <span>Scheduled <span id="stack-filter-scheduled-count" class="count-pill">0</span></span></label>
+              <label><input type="radio" name="stack-filter" value="paused"> <span>Paused <span id="stack-filter-paused-count" class="count-pill">0</span></span></label>
+            </div>
             <p id="manual-backup-hint" class="manual-backup-hint muted" role="status">
               Include stacks in manual backup below. Selected stacks run one at a time, stopping and restarting their running containers.
             </p>
@@ -165,13 +173,13 @@
               <div>
                 <p class="eyebrow">BRING YOUR CONFIG BACK</p>
                 <h1>Restore a backup</h1>
-                <p class="muted">Choose a local container and upload its backup to restore your files.</p>
+                <p class="muted">Choose a container on the selected Docker host and upload its backup to restore your files.</p>
               </div>
               <button id="refresh-restore" class="secondary">↻ Refresh containers</button>
             </div>
             <article class="panel restore-panel">
               <form id="restore-form">
-                <label>Local container<select id="restore-container" required><option value="">Loading containers…</option></select></label>
+                <label>Container on selected host<select id="restore-container" required><option value="">Loading containers…</option></select></label>
                 <p id="restore-container-info" class="hint"></p>
                 <label>Backup file<input id="restore-file" type="file" accept=".zip,.tar.gz,.tgz,application/zip,application/gzip" required /></label>
                 <p class="hint">Use a Cloud Backup ZIP with its manifest and data, a ZIP containing one downloaded backup, or an existing .tar.gz backup.</p>
