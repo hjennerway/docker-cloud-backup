@@ -132,3 +132,87 @@ def test_streamed_body_limits(configured, tmp_path, monkeypatch):
         assert response.status_code == 413
         response = client.put("/api/hosts/nas/settings", content=iter([b"x" * 100001]), headers=HEADERS)
         assert response.status_code == 413
+
+
+def test_manage_hosts_encrypts_passwords_persists_and_invalidates_sessions(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOCKER_HOSTS_FILE", raising=False)
+    store = Store(tmp_path / "data")
+    values = {"name": "NAS", "url": "http://192.168.1.20:8088", "password": "private-remote-password"}
+    with TestClient(create_app(store, start_worker=False)) as client:
+        assert client.get("/api/host-config").status_code == 401
+        assert client.post("/api/host-config", json=values, headers=HEADERS).status_code == 401
+        login(client)
+        assert client.post("/api/host-config", json=values).status_code == 403
+        response = client.post("/api/host-config", json=values, headers=HEADERS)
+        assert response.status_code == 200
+        host_id = response.json()["id"]
+        row = store.rows("SELECT * FROM remote_hosts")[0]
+        assert values["password"] not in row["password"]
+        assert store.cipher.decrypt(row["password"].encode()).decode() == values["password"]
+        config = client.get("/api/host-config")
+        assert values["password"] not in config.text
+        assert config.json()["hosts"][0]["password_set"] is True
+        assert config.json()["hosts"][0]["read_only"] is False
+        assert client.get("/api/hosts").json()["hosts"][-1] == {"id": host_id, "name": "NAS"}
+        # Blank password retains the secret for the same address, including after restart.
+        response = client.put("/api/host-config/" + host_id,
+                              json={**values, "name": "NAS updated", "password": ""}, headers=HEADERS)
+        assert response.status_code == 200
+        hosts = Hosts(store)
+        assert hosts.hosts[host_id]["password"] == values["password"]
+        assert hosts.hosts[host_id]["name"] == "NAS updated"
+        assert client.put("/api/host-config/" + host_id,
+                          json={**values, "url": "http://192.168.1.21:8088", "password": ""}, headers=HEADERS).status_code == 400
+        hosts.sessions[("user", host_id)] = (99999999999, "cookie")
+        hosts.save({**values, "password": "new-secret"}, host_id)
+        assert not hosts.sessions
+        response = client.delete("/api/host-config/" + host_id, headers=HEADERS)
+        assert response.status_code == 200
+        assert not Hosts(store).hosts
+        assert not store.rows("SELECT * FROM remote_hosts")
+
+
+def test_file_managed_hosts_are_read_only(configured, tmp_path):
+    with TestClient(create_app(Store(tmp_path / "data"), start_worker=False)) as client:
+        login(client)
+        assert client.get("/api/host-config").json()["hosts"][0]["read_only"] is True
+        assert client.delete("/api/host-config/nas", headers=HEADERS).status_code == 400
+        assert client.put("/api/host-config/nas", json={"name": "NAS", "url": "http://nas", "password": "x"}, headers=HEADERS).status_code == 400
+
+
+@pytest.mark.parametrize("url", ["file:///secret", "http://user:password@nas", "http://nas/path", "https://nas?x=1", "http://nas:invalid", "http://na s", "http://nas/#fragment"])
+def test_ui_host_address_validation(tmp_path, monkeypatch, url):
+    monkeypatch.delenv("DOCKER_HOSTS_FILE", raising=False)
+    hosts = Hosts(Store(tmp_path / "data"))
+    with pytest.raises(Exception, match="HTTP or HTTPS"):
+        hosts.save({"name": "NAS", "url": url, "password": "secret"})
+    assert not hosts.hosts
+
+
+def test_connection_test_uses_unsaved_details_and_never_returns_password(tmp_path, monkeypatch):
+    monkeypatch.delenv("DOCKER_HOSTS_FILE", raising=False)
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.post.return_value = remote_login()
+    dashboard = remote_login()
+    dashboard.json.return_value = {"stacks": [], "docker_error": None}
+    connection.get.return_value = dashboard
+    monkeypatch.setattr("app.hosts.requests.Session", lambda: connection)
+    store = Store(tmp_path / "data")
+    with TestClient(create_app(store, start_worker=False)) as client:
+        login(client)
+        values = {"name": "NAS", "url": "https://nas", "password": "test-private-password"}
+        response = client.post("/api/host-config/test", json=values, headers=HEADERS)
+        assert response.status_code == 200
+        assert "test-private-password" not in response.text
+        assert not store.rows("SELECT * FROM remote_hosts")
+        assert connection.post.call_args_list[0].kwargs["json"] == {"password": values["password"]}
+        dashboard.json.return_value = {"stacks": [], "docker_error": "Docker offline"}
+        response = client.post("/api/host-config/test", json=values, headers=HEADERS)
+        assert response.status_code == 400
+        assert "Docker is unavailable" in response.text
+        connection.post.side_effect = requests.ConnectionError("sensitive connection details")
+        response = client.post("/api/host-config/test", json=values, headers=HEADERS)
+        assert response.status_code == 400
+        assert "sensitive connection details" not in response.text

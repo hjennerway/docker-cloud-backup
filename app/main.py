@@ -38,6 +38,12 @@ class Login(BaseModel):
     password: str = Field(max_length=1024)
 
 
+class RemoteHost(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    url: str = Field(min_length=1, max_length=2048)
+    password: str = Field(default="", max_length=1024)
+
+
 class PasswordChange(BaseModel):
     current_password: str = Field(max_length=1024)
     new_password: str = Field(min_length=12, max_length=1024)
@@ -81,7 +87,7 @@ def create_app(store=None, client=None, start_worker=True):
     store = store or Store(os.getenv("DATA_DIR", "/data"))
     serializer = URLSafeTimedSerializer(store.cipher._signing_key, salt="cloud-backup-session-v1")
     credentials = Credentials(store)
-    hosts = Hosts()
+    hosts = Hosts(store)
     attempts, attempt_lock = {}, threading.Lock()
 
     app = FastAPI(title="Docker Cloud Backup", docs_url=None, redoc_url=None, openapi_url=None)
@@ -225,6 +231,31 @@ def create_app(store=None, client=None, start_worker=True):
     @app.get("/api/hosts")
     def list_hosts():
         return {"hosts": hosts.public()}
+
+    @app.get("/api/host-config")
+    def host_configuration():
+        return {"hosts": hosts.configuration()}
+
+    @app.post("/api/host-config")
+    def add_host(body: RemoteHost):
+        return {"id": hosts.save(body.model_dump())}
+
+    @app.post("/api/host-config/test")
+    def test_new_host(body: RemoteHost):
+        return hosts.test(body.model_dump())
+
+    @app.put("/api/host-config/{host_id}")
+    def edit_host(host_id: str, body: RemoteHost):
+        return {"id": hosts.save(body.model_dump(), host_id)}
+
+    @app.post("/api/host-config/{host_id}/test")
+    def test_saved_host(host_id: str, body: RemoteHost):
+        return hosts.test(body.model_dump(), host_id)
+
+    @app.delete("/api/host-config/{host_id}")
+    def remove_host(host_id: str):
+        hosts.remove(host_id)
+        return {"ok": True}
 
     @app.api_route("/api/hosts/{host_id}/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
     async def remote_host(host_id: str, path: str, request: Request):

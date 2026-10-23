@@ -69,7 +69,11 @@ Docker Compose projects are grouped by labels. Saved inactive Dockge stacks are 
 
 The **Docker host** selector switches the entire workspace between hosts, including stacks, backups, restore targets, schedules, destinations and activity. Each host runs its own Cloud Backup instance using the Compose setup above, with its own data volume and local Docker socket/host mounts. The host's worker performs backups, restores and restart recovery locally, including while the connection to your main instance is interrupted. Hosts are explicitly configured; the app does not scan the network.
 
-On the main instance, create a private `docker-hosts.json` file:
+Open **Remote hosts → Add remote host** in the main app. Enter a friendly name, the other machine's Cloud Backup address (for example `http://192.168.1.20:8088`) and its admin password. **Test connection** checks sign-in and Docker availability without saving. **Save host** adds it to the selector immediately, with no container restart or file editing. You can save an offline host and connect later.
+
+Use **Edit or test** to change a connection or check it again. Leave the password blank to keep it; changing the address requires re-entering the password. Saved passwords are encrypted in the main instance's data volume and never returned to the browser. **Remove** deletes only the saved connection; the remote machine's containers, backups and schedules continue unchanged. Host management always applies to the main app, even when a remote workspace is selected.
+
+For file-based deployment, you can alternatively create a private `docker-hosts.json` file:
 
 ```json
 [
@@ -82,7 +86,7 @@ On the main instance, create a private `docker-hosts.json` file:
 ]
 ```
 
-Add `./docker-hosts.json:/run/docker-hosts.json:ro` to its Compose volumes and set `DOCKER_HOSTS_FILE=/run/docker-hosts.json` in `.env`, then recreate the main container. Use the remote instance's reachable base URL without a subpath. Host IDs must be unique lowercase letters/digits/hyphens, up to 40 characters; `local` is reserved. Protect this file like an admin password, keep it out of source control, and use HTTPS on untrusted networks. The credentials stay on the main server and are never returned to the browser. Changes to the file require restarting the main instance; update the file if a remote password changes.
+Add `./docker-hosts.json:/run/docker-hosts.json:ro` to its Compose volumes and set `DOCKER_HOSTS_FILE=/run/docker-hosts.json` in `.env`, then recreate the main container. Use the remote instance's reachable base URL without a subpath. Host IDs must be unique lowercase letters/digits/hyphens, up to 40 characters; `local` is reserved. Protect this file like an admin password, keep it out of source control, and use HTTPS on untrusted networks. File-managed hosts appear as read-only in the UI and take precedence over saved entries with the same ID. Changes to the file require restarting the main instance; update the file if a remote password changes.
 
 Choose a host in the sidebar to work with its containers. Stack names can repeat across hosts because each host keeps its own settings and history. Downloads and restore uploads pass through the main instance; allow disk space there for an uploaded archive and set `MAX_BACKUP_GB` appropriately on both instances. A remote outage leaves the selector available so you can switch back. Close open dialogs and finish pending actions before switching. Running backup jobs continue on their original host.
 

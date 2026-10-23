@@ -67,6 +67,8 @@ class Store:
             db.executescript("""
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS remote_hosts (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                    url TEXT NOT NULL, password TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS admin_credentials (id INTEGER PRIMARY KEY CHECK (id=1),
                     salt TEXT NOT NULL, password_hash TEXT NOT NULL, session_version TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS rules (pattern TEXT PRIMARY KEY, paths TEXT NOT NULL, excludes TEXT NOT NULL);

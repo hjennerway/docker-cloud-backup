@@ -82,6 +82,7 @@
           >
           <a href="#scheduled" data-page="scheduled"><span>▦</span>Scheduled</a>
           <a href="#activity" data-page="activity"><span>◷</span>Activity</a>
+          <a href="#hosts" data-page="hosts"><span>▣</span>Remote hosts</a>
           <a href="#notifications" data-page="notifications"
             ><span>♧</span>Notifications</a
           >
@@ -543,6 +544,15 @@
                 </div>
               </form>
             </article>
+          </section>
+          <section id="page-hosts" class="page hidden">
+            <div class="page-heading">
+              <div><p class="eyebrow">YOUR NETWORK</p><h1>Remote hosts</h1>
+                <p class="muted">Connect another machine running Cloud Backup, then choose it in the Docker host selector.</p></div>
+              <button id="add-remote-host" class="primary">Add remote host</button>
+            </div>
+            <p class="hint">These connections are saved on the main app. Each remote machine needs its own Cloud Backup instance. Enter its app address and admin password, rather than a Docker socket address.</p>
+            <div id="remote-hosts-list" aria-live="polite"></div>
           </section>
           <footer>Docker Cloud Backup <span>Config, kept safe.</span></footer>
         </div>

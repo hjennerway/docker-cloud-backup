@@ -35,7 +35,7 @@ test("host selection routes workspace APIs but keeps portal authentication local
   for (const path of ["/dashboard", "/stacks/same-name/backup", "/restore/upload", "/restore/preview", "/restore", "/jobs/id/download", "/settings"]) {
     assert.equal(ui.run(`apiPath(${JSON.stringify(path)})`), "/api/hosts/nas" + path);
   }
-  for (const path of ["/login", "/logout", "/session", "/password", "/hosts"]) {
+  for (const path of ["/login", "/logout", "/session", "/password", "/hosts", "/host-config", "/host-config/test", "/host-config/host-id", "/host-config/host-id/test"]) {
     assert.equal(ui.run(`apiPath(${JSON.stringify(path)})`), "/api" + path);
   }
   assert.equal(workspace("local").run('apiPath("/restore")'), "/api/restore");

@@ -23,9 +23,10 @@ let state = null,
 const manualSelectionsSaving = new Map();
 let selectedHost = sessionStorage.getItem("docker-host") || "local";
 let hostName = "Local Docker host", pendingHostActions = 0;
+let remoteHostConfigs = [];
 const localEndpoints = new Set(["/login", "/logout", "/session", "/password", "/hosts"]);
 function apiPath(url) {
-  return "/api" + (selectedHost !== "local" && !localEndpoints.has(url)
+  return "/api" + (selectedHost !== "local" && !localEndpoints.has(url) && !url.startsWith("/host-config")
     ? "/hosts/" + encodeURIComponent(selectedHost) : "") + url;
 }
 let stackFilter = "all";
@@ -45,6 +46,7 @@ const pages = {
   mappings: "Image mappings",
   activity: "Activity",
   notifications: "Notifications",
+  hosts: "Remote hosts",
 };
 function toast(message, failure = false) {
   $("toast").textContent = message;
@@ -148,6 +150,9 @@ function route() {
     .querySelectorAll("nav a")
     .forEach((el) => el.classList.toggle("active", el.dataset.page === page));
   $("page-label").textContent = pages[page];
+  if (page === "hosts") loadHostConfiguration().catch((e) => {
+    $("remote-hosts-list").textContent = e.message;
+  });
   if (state) {
     render();
     if (page === "destinations" || page === "notifications") fillSettings();
@@ -594,6 +599,84 @@ function openModal(eyebrow, html) {
 function closeModal() {
   $("modal").close();
 }
+async function refreshHostSelector() {
+  const { hosts } = await api("/hosts");
+  $("docker-host").innerHTML = hosts.map((host) => `<option value="${esc(host.id)}">${esc(host.name)}</option>`).join("");
+  $("docker-host").value = selectedHost;
+  hostName = hosts.find((host) => host.id === selectedHost)?.name || "Local Docker host";
+  $("host-name").textContent = hostName;
+}
+async function loadHostConfiguration() {
+  const result = await api("/host-config");
+  remoteHostConfigs = result.hosts;
+  $("remote-hosts-list").innerHTML = remoteHostConfigs.length
+    ? remoteHostConfigs.map((host) => `<article class="job-card"><div class="job-title"><h3>${esc(host.name)}</h3>${host.id === selectedHost ? '<span class="badge good">Selected host</span>' : ""}</div><p>${esc(host.url)}</p>${host.read_only ? '<p class="hint">Managed by the hosts file. Change its details in that file.</p>' : `<div class="actions"><button class="secondary" data-action="host-edit" data-id="${esc(host.id)}">Edit or test</button><button class="text-button" data-action="host-remove" data-id="${esc(host.id)}">Remove</button></div>`}</article>`).join("")
+    : '<div class="empty"><h3>No remote hosts yet</h3><p>Add a host to view its containers and manage backups and restores here.</p></div>';
+}
+function hostDialog(hostId) {
+  const host = remoteHostConfigs.find((item) => item.id === hostId);
+  openModal("REMOTE HOST", `<h2>${host ? "Edit remote host" : "Add remote host"}</h2><form id="remote-host-form">
+    <label>Host name<input id="remote-host-name" value="${esc(host?.name || "")}" maxlength="100" placeholder="NAS" required></label>
+    <label>Cloud Backup address<input id="remote-host-url" type="url" value="${esc(host?.url || "")}" maxlength="2048" placeholder="http://192.168.1.20:8088" required></label>
+    <p class="hint">Use the address you would open in a browser on the remote machine. Use HTTPS on untrusted networks.</p>
+    <label>Remote admin password<input id="remote-host-password" type="password" maxlength="1024" autocomplete="new-password" ${host ? 'placeholder="Leave blank to keep the saved password"' : "required"}></label>
+    <p class="hint">Saved passwords are encrypted. Re-enter the password when changing the address.</p>
+    <p id="remote-host-result" class="hint" role="status"></p>
+    <div class="actions"><button class="primary">Save host</button><button id="test-remote-host" type="button" class="secondary">Test connection</button><button type="button" class="text-button" data-action="close">Cancel</button></div>
+  </form>`);
+  const form = $("remote-host-form"), result = $("remote-host-result");
+  const data = () => ({ name: $("remote-host-name").value.trim(), url: $("remote-host-url").value.trim(), password: $("remote-host-password").value });
+  const busy = (value) => form.querySelectorAll("button").forEach((button) => { button.disabled = value; });
+  $("test-remote-host").onclick = async () => {
+    if (!form.reportValidity()) return;
+    busy(true);
+    result.className = "hint";
+    result.textContent = "Checking connection…";
+    try {
+      const response = await api("/host-config" + (host ? "/" + host.id : "") + "/test", "POST", data());
+      result.textContent = response.message;
+    } catch (e) {
+      result.className = "hint error";
+      result.textContent = e.message;
+    } finally { busy(false); }
+  };
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    busy(true);
+    try {
+      await api("/host-config" + (host ? "/" + host.id : ""), host ? "PUT" : "POST", data());
+      closeModal();
+      if (host?.id === selectedHost) { window.location.reload(); return; }
+      await Promise.all([loadHostConfiguration(), refreshHostSelector()]);
+      toast("Remote host saved. Choose it in the Docker host selector.");
+    } catch (e) {
+      result.className = "hint error";
+      result.textContent = e.message;
+    } finally { busy(false); }
+  };
+}
+function removeHostDialog(hostId) {
+  const host = remoteHostConfigs.find((item) => item.id === hostId);
+  if (!host || host.read_only) return;
+  openModal("REMOTE HOST", `<h2>Remove ${esc(host.name)}?</h2><p>This removes the saved connection. Backups, schedules and containers on that host remain in place.</p><p id="remove-host-error" class="error" role="alert"></p><div class="actions"><button id="confirm-remove-host" class="primary">Remove connection</button><button class="secondary" data-action="close">Cancel</button></div>`);
+  $("confirm-remove-host").onclick = async (event) => {
+    event.target.disabled = true;
+    try {
+      await api("/host-config/" + host.id, "DELETE");
+      closeModal();
+      if (host.id === selectedHost) {
+        sessionStorage.removeItem("docker-host");
+        window.location.reload();
+        return;
+      }
+      await Promise.all([loadHostConfiguration(), refreshHostSelector()]);
+      toast("Remote host removed.");
+    } catch (e) {
+      $("remove-host-error").textContent = e.message;
+      event.target.disabled = false;
+    }
+  };
+}
 function passwordDialog() {
   openModal(
     "ACCOUNT SECURITY",
@@ -834,6 +917,12 @@ document.addEventListener("click", async (e) => {
   if (!b || b.disabled) return;
   try {
     switch (b.dataset.action) {
+      case "host-edit":
+        hostDialog(b.dataset.id);
+        break;
+      case "host-remove":
+        removeHostDialog(b.dataset.id);
+        break;
       case "scheduled-window":
         if (scheduledDays !== Number(b.dataset.days)) {
           scheduledDays = Number(b.dataset.days);
@@ -1107,6 +1196,7 @@ $("test-notification").onclick = async () => {
   }
 };
 window.addEventListener("hashchange", route);
+$("add-remote-host").onclick = () => hostDialog();
 $("docker-host").onchange = (event) => {
   if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size || $("modal").open) {
     event.target.value = selectedHost;
