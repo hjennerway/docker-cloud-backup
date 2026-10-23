@@ -24,7 +24,9 @@ const manualSelectionsSaving = new Map();
 let selectedHost = sessionStorage.getItem("docker-host") || "local";
 let hostName = "Local Docker host", pendingHostActions = 0;
 let remoteHostConfigs = [];
-const localEndpoints = new Set(["/login", "/logout", "/session", "/password", "/hosts"]);
+let stackHostView = sessionStorage.getItem("stack-host-view") || "all";
+let stackOverview = null, overviewPromise = null;
+const localEndpoints = new Set(["/login", "/logout", "/session", "/password", "/hosts", "/stack-overview"]);
 function apiPath(url) {
   return "/api" + (selectedHost !== "local" && !localEndpoints.has(url) && !url.startsWith("/host-config")
     ? "/hosts/" + encodeURIComponent(selectedHost) : "") + url;
@@ -153,6 +155,10 @@ function route() {
   if (page === "hosts") loadHostConfiguration().catch((e) => {
     $("remote-hosts-list").textContent = e.message;
   });
+  if (page === "stacks" && stackHostView === "all" && !stackOverview) {
+    loadStackOverview().then(() => { if (page === "stacks") renderStacks(); }).catch((e) => toast(e.message, true));
+  }
+  if (page === "stacks" && !state && stackOverview) renderStacks();
   if (state) {
     render();
     if (page === "destinations" || page === "notifications") fillSettings();
@@ -169,6 +175,7 @@ async function refresh(fresh = false) {
   refreshPromise = api("/dashboard")
     .then(async (dashboard) => {
       state = dashboard;
+      if (page === "stacks" && stackHostView === "all") await loadStackOverview();
       render();
       if (page === "restore" && !restoreBusy) await loadRestoreContainers();
       if (page === "scheduled" && !scheduledLoading) await loadScheduled();
@@ -429,6 +436,12 @@ $("restore-start").onclick = async () => {
   finally { restoreBusy = false; renderRestore(); }
 };
 function renderStacks() {
+  $("stack-host-view").value = stackHostView;
+  if (stackHostView === "all" && stackOverview?.hosts.length > 1) {
+    renderStackOverview();
+    return;
+  }
+  if (!state) return;
   const included = (stack) => !stack.excluded &&
     (manualSelectionsSaving.get(stack.name) ?? stack.include_in_manual_backup);
   const selected = state.stacks.filter(included);
@@ -520,6 +533,46 @@ function renderStacks() {
         return `<article class="stack-row${included(s) || s.schedule.enabled ? " stack-row-highlighted" : ""}"><div class="stack-name"><span class="stack-icon">▦</span><div><strong>${esc(s.name)}</strong><small>${s.containers.length} container${s.containers.length === 1 ? "" : "s"} · ${running} running</small></div></div><div class="state-cell">${coverage}<small title="Approximate uncompressed total, including Compose files. Refreshed about once a minute.">${esc(mode)}</small><button class="text-button" data-action="selection" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Choose contents</button></div><div class="volumes-cell"><span class="mobile-label">Volumes</span>${volumes ? `<ul class="volume-list">${volumes}</ul>` : `<small>${s.containers.length ? "No volumes mounted · Config can still be backed up" : "Create containers to discover volumes"}</small>`}</div><div class="schedule-cell">${s.schedule.enabled ? `<code>${esc(s.schedule.cron)}</code><small>Next: ${esc(date(s.schedule.next_run, s.schedule.timezone))}</small>` : '<span class="badge neutral">Paused</span><small>Manual backup available</small>'}</div>${manualToggle}<div class="row-actions"><button class="secondary" data-action="schedule" data-name="${esc(s.name)}" ${s.excluded ? "disabled" : ""}>Schedule</button><button class="${ready ? "primary" : "secondary"}" data-action="review" data-name="${esc(s.name)}">${ready ? "Back up" : "Review"}</button></div></article>`;
       })
       .join("");
+}
+async function loadStackOverview() {
+  if (overviewPromise) return overviewPromise;
+  overviewPromise = api("/stack-overview").then((result) => { stackOverview = result; })
+    .finally(() => { overviewPromise = null; });
+  return overviewPromise;
+}
+function renderStackOverview() {
+  const hosts = stackOverview.hosts;
+  const stacks = hosts.flatMap((host) => host.stacks);
+  const offline = hosts.filter((host) => host.error).length;
+  $("stack-count").textContent = stacks.length;
+  $("stack-total").textContent = stacks.length;
+  $("backup-selected").textContent = "Manage backups per host";
+  $("backup-selected").disabled = true;
+  $("manual-backup-hint").textContent = "All configured hosts are shown below. Open a stack to choose its contents, run a backup or change its schedule on that host.";
+  $("metrics").innerHTML = [["Docker hosts", hosts.length], ["Discovered stacks", stacks.length],
+    ["Containers", stacks.reduce((total, stack) => total + stack.containers.length, 0)], ["Hosts needing attention", offline]]
+    .map(([title, count]) => `<article class="metric"><div class="metric-top"><span>${title}</span></div><strong>${count}</strong><small>Across all configured hosts</small></article>`).join("");
+  const filters = {
+    all: () => true,
+    manual: (stack) => !stack.excluded && stack.include_in_manual_backup,
+    scheduled: (stack) => stack.schedule.enabled,
+    paused: (stack) => !stack.schedule.enabled,
+  };
+  for (const [filter, matches] of Object.entries(filters)) {
+    $(`stack-filter-${filter}-count`).textContent = stacks.filter(matches).length;
+  }
+  const query = $("stack-search").value.toLowerCase();
+  $("stacks-list").innerHTML = hosts.map((host) => {
+    const visible = host.stacks.filter((stack) => filters[stackFilter](stack) &&
+      `${host.name} ${stack.name} ${stack.containers.map((c) => c.name).join(" ")}`.toLowerCase().includes(query));
+    if (!visible.length && !host.error && (query || stackFilter !== "all")) return "";
+    return `<section class="host-stack-group"><div class="section-heading"><h3>${esc(host.name)} <span class="count-pill">${host.stacks.length}</span></h3><button class="secondary" data-action="host-stacks" data-id="${esc(host.id)}">Open host</button></div>
+      ${host.error ? `<div class="alert" role="alert">${esc(host.error)}</div>` : ""}
+      ${visible.map((stack) => `<article class="job-card"><div class="job-title"><h3>${esc(stack.name)}</h3><span class="badge ${stack.excluded ? "neutral" : stack.issues.length ? "warn" : "good"}">${stack.excluded ? "Excluded" : stack.issues.length ? "Needs review" : "Ready to back up"}</span></div>
+        <p>${stack.containers.length} container${stack.containers.length === 1 ? "" : "s"} · ${stack.containers.filter((c) => c.state === "running").length} running · ${stack.schedule.enabled ? "Schedule enabled" : "Schedule paused"}</p>
+        <div class="actions"><button class="secondary" data-action="host-stacks" data-id="${esc(host.id)}" data-name="${esc(stack.name)}">Manage stack</button></div></article>`).join("")}
+      ${!host.error && !host.stacks.length ? '<p class="muted">No stacks discovered on this host.</p>' : ""}</section>`;
+  }).join("") || '<div class="empty"><h3>No matching stacks</h3><p>Try a different search or filter.</p></div>';
 }
 function renderJobs() {
   if (!state.jobs.length) {
@@ -917,6 +970,17 @@ document.addEventListener("click", async (e) => {
   if (!b || b.disabled) return;
   try {
     switch (b.dataset.action) {
+      case "host-stacks":
+        if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size) {
+          toast("Finish the current action before switching hosts.", true);
+          break;
+        }
+        sessionStorage.setItem("docker-host", b.dataset.id);
+        sessionStorage.setItem("stack-host-view", "selected");
+        if (b.dataset.name) sessionStorage.setItem("stack-focus", b.dataset.name);
+        location.hash = "stacks";
+        window.location.reload();
+        break;
       case "host-edit":
         hostDialog(b.dataset.id);
         break;
@@ -1196,6 +1260,15 @@ $("test-notification").onclick = async () => {
   }
 };
 window.addEventListener("hashchange", route);
+$("stack-host-view").onchange = async (event) => {
+  stackHostView = event.target.value;
+  $("stack-search").value = "";
+  sessionStorage.setItem("stack-host-view", stackHostView);
+  try {
+    if (stackHostView === "all") await loadStackOverview();
+    if (state) renderStacks();
+  } catch (e) { toast(e.message, true); }
+};
 $("add-remote-host").onclick = () => hostDialog();
 $("docker-host").onchange = (event) => {
   if (pendingHostActions || restoreBusy || manualBackupBusy || manualSelectionsSaving.size || $("modal").open) {
@@ -1204,6 +1277,7 @@ $("docker-host").onchange = (event) => {
     return;
   }
   sessionStorage.setItem("docker-host", event.target.value);
+  sessionStorage.setItem("stack-host-view", "selected");
   window.location.reload();
 };
 setInterval(() => {
@@ -1221,6 +1295,11 @@ setInterval(() => {
       hostName = hosts.find((host) => host.id === selectedHost).name;
       $("docker-host").innerHTML = hosts.map((host) => `<option value="${esc(host.id)}">${esc(host.name)}</option>`).join("");
       $("docker-host").value = selectedHost;
+      const focusedStack = sessionStorage.getItem("stack-focus");
+      if (focusedStack) {
+        $("stack-search").value = focusedStack;
+        sessionStorage.removeItem("stack-focus");
+      }
       await refresh();
       showApp();
     } else showLogin();

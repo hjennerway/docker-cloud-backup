@@ -35,10 +35,35 @@ test("host selection routes workspace APIs but keeps portal authentication local
   for (const path of ["/dashboard", "/stacks/same-name/backup", "/restore/upload", "/restore/preview", "/restore", "/jobs/id/download", "/settings"]) {
     assert.equal(ui.run(`apiPath(${JSON.stringify(path)})`), "/api/hosts/nas" + path);
   }
-  for (const path of ["/login", "/logout", "/session", "/password", "/hosts", "/host-config", "/host-config/test", "/host-config/host-id", "/host-config/host-id/test"]) {
+  for (const path of ["/login", "/logout", "/session", "/password", "/hosts", "/stack-overview", "/host-config", "/host-config/test", "/host-config/host-id", "/host-config/host-id/test"]) {
     assert.equal(ui.run(`apiPath(${JSON.stringify(path)})`), "/api" + path);
   }
   assert.equal(workspace("local").run('apiPath("/restore")'), "/api/restore");
+});
+
+test("all-host stacks are grouped by machine, including duplicate names and offline hosts", () => {
+  const ui = workspace();
+  const stack = { name: "same-stack", containers: [{ name: "app", state: "running" }], issues: [], schedule: { enabled: false } };
+  const overview = { hosts: [
+    { id: "local", name: "Local Docker host", stacks: [stack], error: null },
+    { id: "nas", name: "NAS", stacks: [stack], error: null },
+    { id: "offline", name: "Offline host", stacks: [], error: "Cannot reach the remote host." },
+  ] };
+  ui.run(`state = {}; stackOverview = ${JSON.stringify(overview)}; renderStacks();`);
+  const html = ui.element("stacks-list").innerHTML;
+  assert.equal((html.match(/<h3>same-stack<\/h3>/g) || []).length, 2);
+  assert.match(html, /Local Docker host/);
+  assert.match(html, /NAS/);
+  assert.match(html, /Cannot reach the remote host/);
+  assert.match(html, /data-id="local"/);
+  assert.match(html, /data-id="nas"/);
+  assert.equal(ui.element("stack-total").textContent, 2);
+  assert.equal(ui.element("backup-selected").disabled, true);
+  ui.run("state = null; renderStacks();");
+  assert.match(ui.element("stacks-list").innerHTML, /NAS/);
+  ui.element("stack-search").value = "nas";
+  ui.run("renderStackOverview()");
+  assert.equal((ui.element("stacks-list").innerHTML.match(/<h3>same-stack<\/h3>/g) || []).length, 1);
 });
 
 test("downloads remain bound to their host", () => {

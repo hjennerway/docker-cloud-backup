@@ -320,3 +320,33 @@ def test_real_remote_app_login_test_save_and_switch_flow(tmp_path, monkeypatch):
         server.should_exit = True
         thread.join(timeout=10)
         listener.close()
+
+
+def test_stack_overview_combines_hosts_and_preserves_partial_failures(configured, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    config = json.loads(configured.read_text())
+    config.append({"id": "offline", "name": "Offline", "url": "https://offline.example", "password": "secret"})
+    configured.write_text(json.dumps(config))
+    stack = {"name": "same-stack", "containers": []}
+
+    def remote_request(self, host_id, *args):
+        if host_id == "offline":
+            raise BackupError("Cannot reach the remote host.")
+        response = remote_login()
+        response.json.return_value = {"stacks": [stack], "docker_error": None}
+        return response
+
+    monkeypatch.setattr(Hosts, "request", remote_request)
+    app = create_app(Store(tmp_path / "data"), start_worker=False)
+    app.state.engine = SimpleNamespace(discovery=SimpleNamespace(stacks=lambda **kw: [stack]), close=lambda: None)
+    with TestClient(app) as client:
+        assert client.get("/api/stack-overview").status_code == 401
+        login(client)
+        response = client.get("/api/stack-overview")
+        assert response.status_code == 200
+        hosts = response.json()["hosts"]
+        assert [host["id"] for host in hosts] == ["local", "nas", "offline"]
+        assert hosts[0]["stacks"][0]["name"] == hosts[1]["stacks"][0]["name"] == "same-stack"
+        assert hosts[2]["stacks"] == []
+        assert hosts[2]["error"] == "Cannot reach the remote host."
+        assert "remote-secret" not in response.text

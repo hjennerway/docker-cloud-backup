@@ -67,7 +67,9 @@ Docker Compose projects are grouped by labels. Saved inactive Dockge stacks are 
 
 ## Other Docker hosts
 
-The **Docker host** selector switches the entire workspace between hosts, including stacks, backups, restore targets, schedules, destinations and activity. Each host runs its own Cloud Backup instance using the Compose setup above, with its own data volume and local Docker socket/host mounts. The host's worker performs backups, restores and restart recovery locally, including while the connection to your main instance is interrupted. Hosts are explicitly configured; the app does not scan the network.
+The **Stacks** page defaults to **All hosts**, grouping stacks from every configured machine under its host name. Offline hosts show their connection error while reachable hosts remain visible. Search includes host, stack and container names. **Manage stack** opens that host's controls for the chosen stack; **Open host** opens all its stacks. Choose **All hosts** again to return to the combined view. Backup actions run in the selected host's workspace, so identically named stacks on different machines remain separate.
+
+The **Docker host** selector switches the workspace between hosts, including stacks, backups, restore targets, schedules, destinations and activity. Choosing a host sets the Stacks page to **Selected Docker host**. Each host runs its own Cloud Backup instance using the Compose setup above, with its own data volume and local Docker socket/host mounts. The host's worker performs backups, restores and restart recovery locally, including while the connection to your main instance is interrupted. Hosts are explicitly configured; the app does not scan the network.
 
 Open **Remote hosts → Add remote host** in the main app. Enter a friendly name, the other machine's Cloud Backup address (for example `http://192.168.1.20:8088`) and its admin password. **Test connection** checks sign-in and Docker availability without saving. **Save host** adds it to the selector immediately, with no container restart or file editing. You can save an offline host and connect later.
 

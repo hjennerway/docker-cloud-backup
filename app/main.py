@@ -9,6 +9,7 @@ import threading
 import tempfile
 import time
 from contextlib import asynccontextmanager
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal
@@ -31,7 +32,7 @@ from .discovery import BackupError, Discovery, validate_rule
 from .store import DEFAULTS, SECRETS, Store
 from .restore import restore_limit
 from .scheduled import scheduled_jobs
-from .hosts import Hosts
+from .hosts import Hosts, check_response, connection_error
 
 
 class Login(BaseModel):
@@ -232,6 +233,36 @@ def create_app(store=None, client=None, start_worker=True):
     def list_hosts():
         return {"hosts": hosts.public()}
 
+    @app.get("/api/stack-overview")
+    def stack_overview(request: Request):
+        user_id = session(request)["id"]
+
+        def discover(host):
+            result = {**host, "stacks": [], "error": None}
+            try:
+                if host["id"] == "local":
+                    result["stacks"] = engine().discovery.stacks(include_sizes=False)
+                else:
+                    with hosts.request(host["id"], user_id, "GET", "dashboard", [("include_sizes", "false")],
+                                       None, "application/json") as response:
+                        check_response(response)
+                        data = response.json()
+                    if not isinstance(data, dict) or not isinstance(data.get("stacks"), list):
+                        raise BackupError("The host did not return Cloud Backup stack data. Check its address and app version.")
+                    result["stacks"] = data["stacks"]
+                    result["error"] = data.get("docker_error")
+            except BackupError as exc:
+                result["error"] = str(exc)
+            except requests.RequestException as exc:
+                result["error"] = str(connection_error(exc))
+            except (ValueError, TypeError):
+                result["error"] = "The host did not return Cloud Backup stack data. Check its address and app version."
+            return result
+
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            results = list(pool.map(discover, hosts.public()))
+        return {"hosts": results}
+
     @app.get("/api/host-config")
     def host_configuration():
         return {"hosts": hosts.configuration()}
@@ -293,10 +324,10 @@ def create_app(store=None, client=None, start_worker=True):
                                  background=BackgroundTask(upstream.close))
 
     @app.get("/api/dashboard")
-    def dashboard():
+    def dashboard(include_sizes: bool = True):
         error, stacks = None, []
         try:
-            stacks = engine().discovery.stacks()
+            stacks = engine().discovery.stacks(include_sizes=include_sizes)
         except BackupError as exc:
             error = str(exc)
         jobs = store.rows("SELECT * FROM jobs ORDER BY started DESC LIMIT 100")
