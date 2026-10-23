@@ -41,7 +41,7 @@ test("host selection routes workspace APIs but keeps portal authentication local
   assert.equal(workspace("local").run('apiPath("/restore")'), "/api/restore");
 });
 
-test("all-host stacks are grouped by machine, including duplicate names and offline hosts", () => {
+test("all-host stacks share one list with host badges, duplicate names and offline hosts", () => {
   const ui = workspace();
   const stack = { name: "same-stack", containers: [{ name: "app", state: "running" }], issues: [], schedule: { enabled: false } };
   const overview = { hosts: [
@@ -52,7 +52,8 @@ test("all-host stacks are grouped by machine, including duplicate names and offl
   ui.run(`state = {}; stackOverview = ${JSON.stringify(overview)}; renderStacks();`);
   const html = ui.element("stacks-list").innerHTML;
   assert.equal((html.match(/<h3>same-stack<\/h3>/g) || []).length, 2);
-  assert.match(html, /Local Docker host/);
+  assert.match(html, /<span class="badge neutral">local<\/span>/);
+  assert.doesNotMatch(html, /host-stack-group/);
   assert.match(html, /NAS/);
   assert.match(html, /Cannot reach the remote host/);
   assert.match(html, /data-id="local"/);
@@ -64,6 +65,25 @@ test("all-host stacks are grouped by machine, including duplicate names and offl
   ui.element("stack-search").value = "nas";
   ui.run("renderStackOverview()");
   assert.equal((ui.element("stacks-list").innerHTML.match(/<h3>same-stack<\/h3>/g) || []).length, 1);
+});
+
+test("unified stacks sort across hosts and retain the host for duplicate names", () => {
+  const ui = workspace();
+  const stack = (name) => ({ name, containers: [], issues: [], schedule: { enabled: false } });
+  const overview = { hosts: [
+    { id: "nas", name: "NAS", stacks: [stack("Zulu"), stack("alpha"), stack("Same")] },
+    { id: "local", name: "Local Docker host", stacks: [stack("beta"), stack("Same")] },
+  ] };
+  ui.run(`stackOverview = ${JSON.stringify(overview)}; renderStackOverview();`);
+  const html = ui.element("stacks-list").innerHTML;
+  assert.deepEqual([...html.matchAll(/<h3>(.*?)<\/h3>/g)].map((match) => match[1]),
+    ["alpha", "beta", "Same", "Same", "Zulu"]);
+  assert.deepEqual([...html.matchAll(/data-id="([^"]+)" data-name="Same"/g)].map((match) => match[1]),
+    ["local", "nas"]);
+  ui.element("stack-search").value = "local";
+  ui.run("renderStackOverview()");
+  assert.doesNotMatch(ui.element("stacks-list").innerHTML, /data-id="nas"/);
+  assert.match(ui.element("stacks-list").innerHTML, /<h3>beta<\/h3>/);
 });
 
 test("downloads remain bound to their host", () => {

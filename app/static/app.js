@@ -562,17 +562,19 @@ function renderStackOverview() {
     $(`stack-filter-${filter}-count`).textContent = stacks.filter(matches).length;
   }
   const query = $("stack-search").value.toLowerCase();
-  $("stacks-list").innerHTML = hosts.map((host) => {
-    const visible = host.stacks.filter((stack) => filters[stackFilter](stack) &&
-      `${host.name} ${stack.name} ${stack.containers.map((c) => c.name).join(" ")}`.toLowerCase().includes(query));
-    if (!visible.length && !host.error && (query || stackFilter !== "all")) return "";
-    return `<section class="host-stack-group"><div class="section-heading"><h3>${esc(host.name)} <span class="count-pill">${host.stacks.length}</span></h3><button class="secondary" data-action="host-stacks" data-id="${esc(host.id)}">Open host</button></div>
-      ${host.error ? `<div class="alert" role="alert">${esc(host.error)}</div>` : ""}
-      ${visible.map((stack) => `<article class="job-card"><div class="job-title"><h3>${esc(stack.name)}</h3><span class="badge ${stack.excluded ? "neutral" : stack.issues.length ? "warn" : "good"}">${stack.excluded ? "Excluded" : stack.issues.length ? "Needs review" : "Ready to back up"}</span></div>
+  const hostLabel = (host) => host.id === "local" ? "local" : host.name;
+  const visible = hosts.flatMap((host) => host.stacks.map((stack) => ({ host, stack })))
+    .filter(({ host, stack }) => filters[stackFilter](stack) &&
+      `${hostLabel(host)} ${host.name} ${stack.name} ${stack.containers.map((c) => c.name).join(" ")}`.toLowerCase().includes(query))
+    .sort((a, b) => a.stack.name.localeCompare(b.stack.name, undefined, { sensitivity: "base" }) ||
+      hostLabel(a.host).localeCompare(hostLabel(b.host), undefined, { sensitivity: "base" }) ||
+      a.host.id.localeCompare(b.host.id));
+  const alerts = hosts.filter((host) => host.error).map((host) =>
+    `<div class="alert" role="alert"><strong>${esc(hostLabel(host))}</strong>: ${esc(host.error)} <button class="text-button" data-action="host-stacks" data-id="${esc(host.id)}">Open host</button></div>`).join("");
+  $("stacks-list").innerHTML = alerts + (visible.map(({ host, stack }) => `<article class="job-card"><div class="job-title"><h3>${esc(stack.name)}</h3><span class="badge neutral">${esc(hostLabel(host))}</span><span class="badge ${stack.excluded ? "neutral" : stack.issues.length ? "warn" : "good"}">${stack.excluded ? "Excluded" : stack.issues.length ? "Needs review" : "Ready to back up"}</span></div>
         <p>${stack.containers.length} container${stack.containers.length === 1 ? "" : "s"} · ${stack.containers.filter((c) => c.state === "running").length} running · ${stack.schedule.enabled ? "Schedule enabled" : "Schedule paused"}</p>
-        <div class="actions"><button class="secondary" data-action="host-stacks" data-id="${esc(host.id)}" data-name="${esc(stack.name)}">Manage stack</button></div></article>`).join("")}
-      ${!host.error && !host.stacks.length ? '<p class="muted">No stacks discovered on this host.</p>' : ""}</section>`;
-  }).join("") || '<div class="empty"><h3>No matching stacks</h3><p>Try a different search or filter.</p></div>';
+        <div class="actions"><button class="secondary" data-action="host-stacks" data-id="${esc(host.id)}" data-name="${esc(stack.name)}">Manage stack</button></div></article>`).join("") ||
+    `<div class="empty"><h3>${query || stackFilter !== "all" ? "No matching stacks" : "No stacks discovered yet"}</h3><p>${query || stackFilter !== "all" ? "Try a different search or filter." : "Stacks from all configured hosts will appear here."}</p></div>`);
 }
 function renderJobs() {
   if (!state.jobs.length) {
