@@ -620,7 +620,7 @@ function hostDialog(hostId) {
     <label>Cloud Backup address<input id="remote-host-url" type="url" value="${esc(host?.url || "")}" maxlength="2048" placeholder="http://192.168.1.20:8088" required></label>
     <p class="hint">Use the address you would open in a browser on the remote machine. Use HTTPS on untrusted networks.</p>
     <label>Remote admin password<input id="remote-host-password" type="password" maxlength="1024" autocomplete="new-password" ${host ? 'placeholder="Leave blank to keep the saved password"' : "required"}></label>
-    <p class="hint">Saved passwords are encrypted. Re-enter the password when changing the address.</p>
+    <p class="hint">Use the password you currently use to sign in to Cloud Backup on the remote machine. Saved passwords are encrypted. Re-enter the password when changing the address.</p>
     <p id="remote-host-result" class="hint" role="status"></p>
     <div class="actions"><button class="primary">Save host</button><button id="test-remote-host" type="button" class="secondary">Test connection</button><button type="button" class="text-button" data-action="close">Cancel</button></div>
   </form>`);

@@ -6,6 +6,7 @@ import requests
 from fastapi.testclient import TestClient
 
 from app.hosts import Hosts
+from app.discovery import BackupError
 from app.main import create_app
 from app.store import Store
 
@@ -216,3 +217,106 @@ def test_connection_test_uses_unsaved_details_and_never_returns_password(tmp_pat
         response = client.post("/api/host-config/test", json=values, headers=HEADERS)
         assert response.status_code == 400
         assert "sensitive connection details" not in response.text
+
+
+@pytest.mark.parametrize("status,message", [
+    (401, "Incorrect remote admin password"), (403, "HTTP 403"), (404, "HTTP 404"),
+    (429, "Wait five minutes"), (302, "redirected"), (503, "HTTP 503"),
+])
+def test_sign_in_errors_match_for_test_and_host_selector(configured, monkeypatch, status, message):
+    response = remote_login()
+    response.status_code = status
+    connection = Mock()
+    connection.__enter__ = Mock(return_value=connection)
+    connection.__exit__ = Mock(return_value=False)
+    connection.post.return_value = response
+    monkeypatch.setattr("app.hosts.requests.Session", lambda: connection)
+    monkeypatch.setattr("app.hosts.requests.post", Mock(return_value=response))
+    hosts = Hosts()
+    values = {"name": "NAS", "url": "https://nas.example", "password": "remote-secret"}
+    for action in [lambda: hosts.test(values), lambda: hosts.cookie("nas", "user")]:
+        with pytest.raises(BackupError, match=message) as error:
+            action()
+        assert "remote-secret" not in str(error.value)
+    assert not hosts.sessions
+
+
+@pytest.mark.parametrize("failure,message", [
+    (requests.Timeout("private-detail"), "No response"),
+    (requests.ConnectionError("private-detail"), "Cannot reach"),
+    (requests.exceptions.SSLError("private-detail"), "HTTPS certificate"),
+])
+def test_transport_errors_are_distinct_from_password_errors(configured, monkeypatch, failure, message):
+    monkeypatch.setattr("app.hosts.requests.post", Mock(side_effect=failure))
+    with pytest.raises(BackupError, match=message) as error:
+        Hosts().cookie("nas", "user")
+    assert "private-detail" not in str(error.value)
+    assert "Incorrect remote admin password" not in str(error.value)
+
+
+def test_unknown_hostname_is_identified_without_exposing_exception(configured, monkeypatch):
+    import socket
+    failure = requests.ConnectionError("private-detail")
+    failure.__cause__ = socket.gaierror("private-dns-detail")
+    monkeypatch.setattr("app.hosts.requests.post", Mock(side_effect=failure))
+    with pytest.raises(BackupError, match="Unknown remote hostname") as error:
+        Hosts().cookie("nas", "user")
+    assert "private-dns-detail" not in str(error.value)
+
+
+def test_successful_login_missing_session_is_not_reported_as_wrong_password(configured, monkeypatch):
+    response = remote_login()
+    response.cookies = {}
+    monkeypatch.setattr("app.hosts.requests.post", Mock(return_value=response))
+    with pytest.raises(BackupError, match="without a Cloud Backup sign-in session"):
+        Hosts().cookie("nas", "user")
+
+
+def test_real_remote_app_login_test_save_and_switch_flow(tmp_path, monkeypatch):
+    """Use real HTTP/cookie handling against the app's actual login endpoint."""
+    import socket
+    import threading
+    import time
+    import uvicorn
+
+    monkeypatch.delenv("DOCKER_HOSTS_FILE", raising=False)
+    monkeypatch.setenv("COOKIE_SECURE", "false")
+    remote_password = '  remote p@ss"word\\with spaces  '
+    monkeypatch.setenv("ADMIN_PASSWORD", remote_password)
+    monkeypatch.setenv("HOST_ROOT", str(tmp_path / "host"))
+    remote_client = Mock()
+    remote_client.containers.list.return_value = []
+    remote = create_app(Store(tmp_path / "remote"), client=remote_client, start_worker=False)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    address = "http://127.0.0.1:" + str(listener.getsockname()[1])
+    server = uvicorn.Server(uvicorn.Config(remote, log_level="critical"))
+    thread = threading.Thread(target=lambda: server.run(sockets=[listener]), daemon=True)
+    thread.start()
+    try:
+        deadline = time.monotonic() + 10
+        while not server.started and thread.is_alive() and time.monotonic() < deadline:
+            threading.Event().wait(0.01)
+        assert server.started
+        store = Store(tmp_path / "main")
+        hosts = Hosts(store)
+        values = {"name": "Remote", "url": address, "password": remote_password}
+        assert "Connected successfully" in hosts.test(values)["message"]
+        with pytest.raises(BackupError, match="Incorrect remote admin password"):
+            hosts.test({**values, "password": "wrong-password"})
+        host_id = hosts.save(values)
+        hosts.save({**values, "password": "", "name": "Renamed"}, host_id)
+        with hosts.request(host_id, "portal-user", "GET", "dashboard", [], None, "application/json") as response:
+            assert response.status_code == 200
+            assert response.json()["stacks"] == []
+        # The same correct password must yield a specific cookie/HTTPS error.
+        monkeypatch.setenv("COOKIE_SECURE", "true")
+        with pytest.raises(BackupError, match="accepted the password, but requires HTTPS"):
+            hosts.test(values)
+        hosts.forget("portal-user")
+        with pytest.raises(BackupError, match="accepted the password, but requires HTTPS"):
+            hosts.cookie(host_id, "portal-user")
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)
+        listener.close()

@@ -73,6 +73,8 @@ Open **Remote hosts → Add remote host** in the main app. Enter a friendly name
 
 Use **Edit or test** to change a connection or check it again. Leave the password blank to keep it; changing the address requires re-entering the password. Saved passwords are encrypted in the main instance's data volume and never returned to the browser. **Remove** deletes only the saved connection; the remote machine's containers, backups and schedules continue unchanged. Host management always applies to the main app, even when a remote workspace is selected.
 
+Connection errors distinguish a rejected remote admin password from an unknown hostname, unreachable host, timeout, HTTPS certificate problem, redirect, rate limit or unexpected app response. Use the current password for the remote Cloud Backup sign-in page; an initial `ADMIN_PASSWORD` value no longer applies after changing it in the app. The address must be reachable and its hostname resolvable from the main Cloud Backup container. If the remote instance uses `COOKIE_SECURE=true`, connect through its HTTPS address; a correct password over HTTP cannot establish that secure session.
+
 For file-based deployment, you can alternatively create a private `docker-hosts.json` file:
 
 ```json

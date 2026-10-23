@@ -2,6 +2,7 @@
 import json
 import os
 import re
+import socket
 import threading
 import time
 import uuid
@@ -11,6 +12,61 @@ from urllib.parse import quote, urlparse
 import requests
 
 from .discovery import BackupError
+
+
+def connection_error(exc):
+    """Classify transport failures without exposing request or credential details."""
+    if isinstance(exc, requests.exceptions.SSLError):
+        return BackupError("Cannot verify the remote host's HTTPS certificate. Check its certificate and use the correct HTTPS address.")
+    if isinstance(exc, requests.Timeout):
+        return BackupError("No response from the remote host before the connection timed out. Check its address, port and network connection.")
+    pending, seen = [exc], set()
+    while pending:
+        cause = pending.pop()
+        if id(cause) in seen:
+            continue
+        seen.add(id(cause))
+        if isinstance(cause, socket.gaierror):
+            return BackupError("Unknown remote hostname. Check the spelling or use the machine's IP address; the name must resolve from the main Cloud Backup container.")
+        pending.extend(item for item in (getattr(cause, "__cause__", None), getattr(cause, "__context__", None),
+                                        getattr(cause, "reason", None), *getattr(cause, "args", ()))
+                       if isinstance(item, BaseException))
+    return BackupError("Cannot reach the remote host. Check its hostname or IP address, port, firewall and that Cloud Backup is running. The address must be reachable from the main Cloud Backup container.")
+
+
+def check_response(response, login=False):
+    status = response.status_code
+    if status == 401:
+        if login:
+            raise BackupError("Incorrect remote admin password. Use the password you currently use to sign in to Cloud Backup on that remote machine.")
+        raise BackupError("The remote host accepted the password but rejected the sign-in session. If secure cookies are enabled there, use its HTTPS address. Also check any reverse proxy authentication.")
+    if status == 429:
+        raise BackupError("The remote host has temporarily blocked sign-in after too many attempts. Wait five minutes before trying again.")
+    if 300 <= status < 400:
+        raise BackupError("The remote host redirected the request. Enter its final Cloud Backup address, including HTTPS if required.")
+    if status == 403:
+        raise BackupError("The remote host denied the request (HTTP 403). Check reverse proxy access rules and that this address points to Cloud Backup.")
+    if status == 404:
+        raise BackupError("The host responded, but the Cloud Backup API was not found (HTTP 404). Check the app address and port.")
+    if status != 200:
+        raise BackupError(f"The remote host responded with HTTP {status}. Check its app and reverse proxy status.")
+
+
+def sign_in(connection, host):
+    try:
+        with connection.post(host["url"] + "/api/login", json={"password": host["password"]},
+                             headers={"X-Requested-With": "cloud-backup"},
+                             timeout=(5, 30), allow_redirects=False) as response:
+            check_response(response, login=True)
+            cookie = response.cookies.get("session")
+            if not cookie:
+                raise BackupError("The host responded without a Cloud Backup sign-in session. Check that the address points to the Cloud Backup app and that its proxy allows cookies.")
+            if host["url"].startswith("http://") and isinstance(response.cookies, requests.cookies.RequestsCookieJar):
+                if any(item.name == "session" and item.secure for item in response.cookies):
+                    raise BackupError("The remote host accepted the password, but requires HTTPS for its sign-in cookie. Use its HTTPS address, or correct COOKIE_SECURE on the remote instance if it is intentionally served over HTTP.")
+            return cookie
+    except requests.RequestException as exc:
+        raise connection_error(exc) from None
 
 
 class Hosts:
@@ -109,25 +165,29 @@ class Hosts:
             host = self.candidate(values, host_id)
         try:
             with requests.Session() as connection:
-                response = connection.post(host["url"] + "/api/login", json={"password": host["password"]},
-                                           headers={"X-Requested-With": "cloud-backup"},
-                                           timeout=(5, 30), allow_redirects=False)
-                with response:
-                    if response.status_code != 200 or not response.cookies.get("session"):
-                        raise ValueError()
-                with connection.get(host["url"] + "/api/dashboard", timeout=(5, 30), allow_redirects=False) as response:
-                    data = response.json()
-                    if response.status_code != 200 or not isinstance(data.get("stacks"), list):
-                        raise ValueError()
-                    if data.get("docker_error"):
-                        raise BackupError("Signed in successfully, but Docker is unavailable on this host. Check its Docker connection.")
-                # A test should not keep a signed-in session on the remote instance.
-                connection.post(host["url"] + "/api/logout", headers={"X-Requested-With": "cloud-backup"},
-                                timeout=(5, 10), allow_redirects=False).close()
+                sign_in(connection, host)
+                try:
+                    with connection.get(host["url"] + "/api/dashboard", timeout=(5, 30), allow_redirects=False) as response:
+                        check_response(response)
+                        try:
+                            data = response.json()
+                        except ValueError:
+                            raise BackupError("The host responded, but did not return Cloud Backup data. Check the app address and reverse proxy.") from None
+                        if not isinstance(data, dict) or not isinstance(data.get("stacks"), list):
+                            raise BackupError("The host responded, but did not return Cloud Backup data. Check the app address and reverse proxy.")
+                        if data.get("docker_error"):
+                            raise BackupError("Signed in successfully, but Docker is unavailable on this host. Check its Docker connection.")
+                finally:
+                    # Cleanup must not turn a successful connection test into a failure.
+                    try:
+                        connection.post(host["url"] + "/api/logout", headers={"X-Requested-With": "cloud-backup"},
+                                        timeout=(5, 10), allow_redirects=False).close()
+                    except requests.RequestException:
+                        pass
         except BackupError:
             raise
-        except Exception:
-            raise BackupError("Could not connect. Check the app address, admin password and that the remote Cloud Backup instance is running.") from None
+        except requests.RequestException as exc:
+            raise connection_error(exc) from None
         return {"message": "Connected successfully. Docker is available on this host."}
 
     def public(self):
@@ -152,15 +212,7 @@ class Hosts:
                 return cached[1]
             if len(self.sessions) >= 1000:
                 raise BackupError("Too many host sessions. Try again later.")
-            try:
-                with requests.post(host["url"] + "/api/login", json={"password": host["password"]},
-                                   headers={"X-Requested-With": "cloud-backup"},
-                                   timeout=(5, 30), allow_redirects=False) as response:
-                    cookie = response.cookies.get("session")
-                    if response.status_code != 200 or not cookie:
-                        raise ValueError()
-            except Exception:
-                raise BackupError("Cannot sign in to the selected Docker host. Check its connection and configured password.") from None
+            cookie = sign_in(requests, host)
             self.sessions[key] = (now + 11 * 3600, cookie)
             return cookie
 
@@ -193,5 +245,5 @@ class Hosts:
                 response.close()
                 raise BackupError("The selected host redirected the request. Configure its final app URL.")
             return response
-        except requests.RequestException:
-            raise BackupError("Cannot reach the selected Docker host. Check its connection and container status.") from None
+        except requests.RequestException as exc:
+            raise connection_error(exc) from None
